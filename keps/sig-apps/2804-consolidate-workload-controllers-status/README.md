@@ -279,7 +279,7 @@ The following table gives an overview on what conditions each of the workload re
 
 **\*\* CronJob does not even have Conditions field in its Status**
 
-### Notes/Constraints/Caveats (Optional)
+### Proposed Conditions
 
 <!--
 What are the caveats to the proposal?
@@ -358,6 +358,14 @@ Kubernetes marks a Job as `running` if there is at least one Pod with phase `Run
 
 This KEP does not introduce CronJob conditions as it is difficult to define conditions that would describe CronJob behaviour in useful manner.
 In case the user is interested if there are any running Jobs, `.status.active` field should be sufficient.
+
+### Notes/Constraints/Caveats (Optional)
+
+As observed in some issues (https://github.com/kubernetes/website/pull/31226) and talking to the users, there is a misunderstanding about the meaning of the `Progressing` condition. These include:
+- Thinking that the `Progressing` condition reflects the state of the current Deployment instead of the last rollout. Which includes expectation that the `Progressing` condition will keep checking availability of replicas and revert to `progressing`/`failed` state even after the `complete` state is reached. And that the progressing condition will thus also reflect any changes in scaling. 
+- Confusion that ProgressDeadlineExceeded does not occur after the Deployment rollout completes when the availability of pods degrades before the  `.spec.progressDeadlineSeconds` times out.
+
+To summarize, the name of the `Progressing` condition doesn't indicate its true meaning that its main responsibility is the indication of rollouts, and it confuses the users.
 
 ### Risks and Mitigations
 

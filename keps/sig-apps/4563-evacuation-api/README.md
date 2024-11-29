@@ -16,6 +16,7 @@
     - [Story 2](#story-2)
     - [Story 3](#story-3)
     - [Story 4](#story-4)
+    - [Story 5](#story-5)
   - [Notes/Constraints/Caveats (Optional)](#notesconstraintscaveats-optional)
     - [Length Limitations for Pod Annotations and Evacuation Finalizers](#length-limitations-for-pod-annotations-and-evacuation-finalizers)
   - [Risks and Mitigations](#risks-and-mitigations)
@@ -44,6 +45,7 @@
     - [StatefulSet Controller](#statefulset-controller)
     - [DaemonSet and Static Pods](#daemonset-and-static-pods)
     - [HorizontalPodAutoscaler](#horizontalpodautoscaler)
+    - [Descheduling and Downscaling](#descheduling-and-downscaling)
   - [Test Plan](#test-plan)
       - [Prerequisite testing updates](#prerequisite-testing-updates)
       - [Unit tests](#unit-tests)
@@ -161,21 +163,28 @@ The major issues are:
    possible to disrupt the pods during a high load without experiencing application downtime. If
    the minimum number of pods is 1, PDBs cannot be used without blocking the node drain. This has
    been discussed in issue [kubernetes/kubernetes#93476](https://github.com/kubernetes/kubernetes/issues/93476).
-3. Graceful deletion of DaemonSet pods is currently only supported as part of (Linux) graceful node
+3. Replicaset scaling down does not take inter-pods scheduling constraints into consideration. The
+   current mechanism for choosing pods to terminate takes only [creation time,
+   node rank](https://github.com/kubernetes/kubernetes/blob/cae35dba5a3060711a2a3f958537003bc74a59c0/pkg/controller/replicaset/replica_set.go#L822-L832),
+   and [pod-deletion-cost annotation](https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/#pod-deletion-cost)
+   into account. This is not sufficient, and it can dis-balance the pods across the nodes as
+   described in [kubernetes/kubernetes#124306](https://github.com/kubernetes/kubernetes/issues/124306)
+   and [many other issues](https://github.com/kubernetes/kubernetes/issues/124306#issuecomment-2493091257).
+4. Descheduler does not allow postponing eviction for applications that are unable to be evicted
+   immediately. This can result in descheduling of incorrect set of pods. This is outlined in the
+   KEP [kubernetes-sigs/descheduler#1354](https://github.com/kubernetes-sigs/descheduler/pull/1354).
+5. Graceful deletion of DaemonSet pods is currently only supported as part of (Linux) graceful node
    shutdown. The length of the shutdown is again not application specific and is set cluster-wide
    (optionally by priority) by the cluster admin. This does not take into account
    `.spec.terminationGracePeriodSeconds` of each pod and may cause premature termination of
    the application. This has been discussed in issue [kubernetes/kubernetes#75482](https://github.com/kubernetes/kubernetes/issues/75482)
    and in issue [kubernetes-sigs/cluster-api#6158](https://github.com/kubernetes-sigs/cluster-api/issues/6158).
-4. Different pod termination mechanisms are not synchronized with each other. So for example, the
+6. Different pod termination mechanisms are not synchronized with each other. So for example, the
    taint manager may prematurely terminate pods that are currently under Node Graceful Shutdown.
    This can also happen with other mechanism (e.g., different types of evictions). This has been
    discussed in the issue [kubernetes/kubernetes#124448](https://github.com/kubernetes/kubernetes/issues/124448)
    and in the issue [kubernetes/kubernetes#72129](https://github.com/kubernetes/kubernetes/issues/72129).
-5. Descheduler does not allow postponing eviction for applications that are unable to be evicted
-   immediately. This can result in descheduling of incorrect set of pods. This is outlined in the
-   KEP [kubernetes-sigs/descheduler#1354](https://github.com/kubernetes-sigs/descheduler/pull/1354).
-6. [Affinity Based Eviction](https://github.com/kubernetes/enhancements/issues/4328) is an upcoming
+7. [Affinity Based Eviction](https://github.com/kubernetes/enhancements/issues/4328) is an upcoming
    feature that would like to introduce the `RequiredDuringSchedulingRequiredDuringExecution`
    nodeAffinity option to remove pods from nodes that do not match this affinity. The controller
    proposed by this feature would like to use the Evacuation API for the disruption safety and
@@ -249,6 +258,7 @@ Example evacuation triggers:
 - Node maintenance controller: node maintenance triggered by an admin.
 - Descheduler: descheduling triggered by a descheduling rule.
 - Cluster autoscaler: node downscaling triggered by a low node utilization.
+- HPA: pod downscaling or rebalancing.
 
 It is understood that multiple evacuation instigators may request evacuation of the same pod at the
 same time. The instigators should coordinate their intent and not remove the evacuation until all
@@ -331,10 +341,16 @@ be able to identify other evacuators and an order in which they will run.
 
 #### Story 4
 
-As an application owner I want my pods to be scheduled on correct nodes. I want to use the
+As an application owner, I want my pods to be scheduled on correct nodes. I want to use the
 descheduler or the upcoming Affinity Based Eviction feature to remove pods from incorrect nodes
 and then have the pods scheduled on new ones. I want to do the rescheduling gracefully and be able
 to control the disruption level of my application (even 0% application unavailability).
+
+#### Story 5
+
+As an application owner, I run a large Deployment with pods that utilize TopologySpreadConstraints.
+I want to downscale such a Deployment so that these constraints are preserved and the pods are
+correctly balanced across the nodes.
 
 ### Notes/Constraints/Caveats (Optional)
 
@@ -437,8 +453,8 @@ exists, the instigator should still add itself to the finalizers. The finalizers
 If the evacuation is no longer needed, the instigator should remove itself from the finalizers.
 The evacuation will be then deleted by the evacuation controller. In case the evacuator has set
 `.status.evacuationCancellationPolicy` to `Forbid`, the evacuation process cannot be cancelled, and
-the evacuation controller will wait to delete the pod until the pod has been terminated and removed
-from etcd.
+the evacuation controller will wait to delete the evacuation until the pod has been terminated and
+removed from etcd.
 
 #### Evacuation Instigator Finalizer
 To distinguish between instigator and other finalizers, instigators should use finalizers in the
@@ -1063,6 +1079,36 @@ workload pods with its evacuator class and a priority.
   `10000`. We would prefer the controller's behaviour. For example, Deployment's `.spec.maxSurge`
   would be preferred over HPA. Otherwise, HPA might scale less or more than `.spec.maxSurge`.
 - If the HPA scaling logic is preferred, a user could set a higher priority on the HPA object.
+
+#### Descheduling and Downscaling
+
+We can use the Evacuation API to deschedule a set of pods controlled by a Deployment/ReplicaSet.
+This is useful when we want to remove a set of pods from a node, either for node maintenance
+reasons or to rebalance the pods across additional nodes.
+
+If set up correctly, the deployment controller will first scale up its pods to achieve this. In
+order to support any de/scheduling constraints during downscaling, we should temporarily disable an
+immediate upscaling.
+
+HPA Downscaling example:
+
+1. Pods of application A are created with Deployment controller evacuator annotation (priority 10000)
+2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets an evacuator
+   annotation (higher priority, e.g. 11000) on all of these pods.
+3. A subset of pods from application A are chosen by the HPA to be scaled down. This may be done in
+   a collaboration with another component responsible for resolving the scheduling constraints.
+4. The HPA creates Evacuation objects for these chosen pods.
+5. The evacuation controller designates the HPA as the evacuator based on the highest priority. No
+   action (termination) is taken on the pods yet.
+6. The HPA downscales the Deployment workload.
+7. The HPA sets ActiveEvacuatorCompleted to true on its own evacuations.
+8. The evacuation controller designates the Deployment (controller) as the next evacuator.
+9. The deployment subsequently downscales the underlying ReplicaSet(s).
+10. The ReplicaSet controller deletes the pods to which an Evacuation object has been assigned,
+    preserving the scheduling constraints.
+
+The same can be done by any descheduling controller (instead of an HPA) to re-balance a set of Pods
+to comply with de/scheduling rules.
 
 ### Test Plan
 

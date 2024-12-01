@@ -280,15 +280,18 @@ action to take when it observes an evacuation intent directed at that evacuator:
    - Migration of data (both persistent and ephemeral) from one node to another.
    - Waiting for a cleanup and release of important resources held by the pod.
    - Waiting for important computations to complete.
-   - Non-graceful deletion of the pod (`gracePeriodSeconds=0`).
+   - Non-graceful termination of the pod (`gracePeriodSeconds=0`).
    - Deletion of a pod that is covered by a blocking PodDisruptionBudget. The controller of the
      application should have additional logic to distinguish whether a disruption of a particular
      pod will disrupt the application as a whole.
    - After a partial cleanup (e.g. storage migrated, notification sent) and if the application is
      still in an available state, the eviction API can be used to respect PodDisruptionBudgets.
 
-In the end, the evacuation should always end with a pod being deleted (evict or delete call) by one
-of the evacuators or by an eviction triggered by the evacuation controller.
+Evacuation should always end with a pod being terminated by one of the evacuators, or by an
+eviction triggered by the evacuation controller. Usually this will also coincide with the deletion
+of the pod (evict or delete call). In some scenarios, the pod may only be terminated (e.g. by a
+remote call) if the pod `restartPolicy` allows it, to preserve the pod data for further processing
+or debugging.
 
 We should discourage the creation of preventive evacuations, so that they do not end up as
 another PDB. So we should design the API appropriately and also not allow behaviors that do not
@@ -308,7 +311,7 @@ no other evacuator available, it will resort to pod eviction by calling the evic
 PodDisruptionBudgets into consideration).
 
 It is also responsible for garbage collection/deletion of existing evacuations whose pods have
-already been deleted.
+reached terminal phase(`Succeeded` or `Failed`) or have been deleted from etcd storage.
 
 ### User Stories (Optional)
 
@@ -351,6 +354,12 @@ to control the disruption level of my application (even 0% application unavailab
 As an application owner, I run a large Deployment with pods that utilize TopologySpreadConstraints.
 I want to downscale such a Deployment so that these constraints are preserved and the pods are
 correctly balanced across the nodes.
+
+#### Story 6
+
+As an application owner, I want to trigger the termination of my pods with `restartPolicy=Never` by
+means other than pod deletion. I want to keep the pod object present for tracking and debugging
+purposes after it has reached the terminal phase (`Succeeded` or `Failed`).
 
 ### Notes/Constraints/Caveats (Optional)
 
@@ -453,8 +462,7 @@ exists, the instigator should still add itself to the finalizers. The finalizers
 If the evacuation is no longer needed, the instigator should remove itself from the finalizers.
 The evacuation will be then deleted by the evacuation controller. In case the evacuator has set
 `.status.evacuationCancellationPolicy` to `Forbid`, the evacuation process cannot be cancelled, and
-the evacuation controller will wait to delete the evacuation until the pod has been terminated and
-removed from etcd.
+the evacuation controller will wait to delete the evacuation until the pod is fully terminated.
 
 #### Evacuation Instigator Finalizer
 To distinguish between instigator and other finalizers, instigators should use finalizers in the
@@ -554,14 +562,15 @@ it may update the status every 3 minutes. The status updates should look as foll
   thereof, if the evacuation is blocked. The evacuator should ensure that an appropriate number of
   events is emitted. `event.involvedObject` should be set to the current Evacuation.
 
-The end of the evacuation is communicated by the pod deletion (evict or delete call) or by setting
-`.status.activeEvacuatorCompleted=true`.
+The end of the evacuation is communicated by pod termination (usually by an evict or delete call)
+and reaching the terminal phase (`Succeeded` or `Failed`). It can also withdraw from the evacuation
+process by setting `.status.activeEvacuatorCompleted=true`.
 
-The evacuator should prefer the eviction API call for the pod deletion to respect the PDBs, unless
-the evacuation process is incompatible with the PDBs and the application has already been disrupted
-(either by the evacuator or by external forces). Or the evacuator has a better insight into the
-application availability than the PDB. In these cases, it is possible to skip the eviction call and
-use the delete call directly.
+The evacuator should prefer the eviction API call for the pod deletion/termination to respect the
+PDBs, unless the evacuation process is incompatible with the PDBs and the application has already
+been disrupted (either by the evacuator or by external forces). Or the evacuator has a better
+insight into the application availability than the PDB. In these cases, it is possible to skip the
+eviction call and use the delete call directly.
 
 Also, the evacuator should not block the evacuation by updating the
 `.status.evacuationProgressTimestamp` when no work is being done on the evacuation. This should
@@ -615,11 +624,16 @@ See [Evacuation Instigator Finalizer](#evacuation-instigator-finalizer) for how 
 between instigator and other finalizers.
 
 The controller deletes the evacuation object if any of the following points is true:
-- There are no instigator finalizers (instigators have canceled their intent to evacuate the pod) and
-  `.status.evacuationCancellationPolicy` is set to `Allow`.
-- The referenced pod no longer exists (has been deleted from etcd), signaling a successful evacuation.
-  For convenience, we will also remove instigator finalizers with `evacuation.coordination.k8s.io/`
-  prefix when the evacuation task is complete. Other finalizers will still block deletion.
+1. There are no instigator finalizers (instigators have canceled their intent to evacuate the pod)
+   and `.status.evacuationCancellationPolicy` is set to `Allow`.
+2. The referenced pod has reached the terminal phase (`Succeeded` or `Failed`), signalling a
+   successful evacuation.
+3. The referenced pod no longer exists (has been deleted from etcd), signalling a successful
+   evacuation.
+
+For convenience, we will also remove instigator finalizers with `evacuation.coordination.k8s.io/`
+prefix when the evacuation task is complete (points 2 and 3). Other finalizers will still block
+deletion.
 
 ### Evacuation API
 
@@ -730,8 +744,8 @@ type EvacuationStatus struct {
 	// ActiveEvacuatorCompleted should be set to true when the evacuator of the
 	// ActiveEvacuatorClass has completed its full or partial evacuation.
 	// This field can also be set to true if no evacuator is available.
-	// If this field is true, no additional evacuator is available, and the evacuated pod still
-	// exists, it is evicted using the Eviction API.
+	// If this field is true, there is no additional evacuator available, and the evacuated pod is
+	// still running, it will be evicted using the Eviction API.
 	// +optional
 	ActiveEvacuatorCompleted bool `json:"activeEvacuatorCompleted,omitempty" protobuf:"varint,2,opt,name=activeEvacuatorCompleted"`
 
@@ -758,15 +772,15 @@ type EvacuationStatus struct {
 	// The default value is Allow.
 	//
 	// Allow policy allows cancellation of this evacuation.
-	// The Evacuation can be deleted before the Pod is deleted and terminated.
+	// The Evacuation can be deleted before the Pod is fully terminated.
 	//
 	// Forbid policy forbids cancellation of this evacuation.
-	// The Evacuation can't be deleted until the Pod is deleted and terminated
+	// The Evacuation can't be deleted until the Pod is fully terminated.
 	//
 	// This field is required.
 	EvacuationCancellationPolicy EvacuationCancellationPolicy `json:"evacuationCancellationPolicy" protobuf:"varint,5,opt,name=evacuationCancellationPolicy"`
 
-	// The number of unsuccessful attempts to evict the referenced pod, e.g. due to a PDB.
+	// The number of unsuccessful attempts to evict the referenced pod, e.g. due to a PodDisruptionBudget.
 	// This field is required.
 	FailedEvictionCounter int32 `json:"failedEvictionCounter" protobuf:"varint,6,opt,name=failedEvictionCounter"`
 
@@ -791,10 +805,10 @@ type EvacuationCancellationPolicy string
 
 const (
 // Allow policy allows cancellation of this evacuation.
-// The Evacuation can be deleted before the Pod is deleted and terminated.
+// The Evacuation can be deleted before the Pod is fully terminated.
 Allow EvacuationCancellationPolicy = "Allow"
 // Forbid policy forbids cancellation of this evacuation.
-// The Evacuation can't be deleted until the Pod is deleted and terminated
+// The Evacuation can't be deleted until the Pod is fully terminated.
 Forbid EvacuationCancellationPolicy = "Forbid"
 )
 

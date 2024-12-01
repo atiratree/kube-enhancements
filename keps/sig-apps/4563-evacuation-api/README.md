@@ -229,6 +229,9 @@ For completeness here is a complete list of upstream open PDB issues. Most are r
 - [Cannot drain node with pod with more than one Pod Disruption Budget](https://github.com/kubernetes/kubernetes/issues/75957)
 - [Eviction should be able to request eviction asynchronously](https://github.com/kubernetes/kubernetes/issues/66811)
 - [Reasonable defaults with eviction and PodDisruptionBudget](https://github.com/kubernetes/kubernetes/issues/35318)
+- [New FailedEviction PodDisruptionCondition](https://github.com/kubernetes/kubernetes/issues/128815)
+- [Distinguish PDB error separately in eviction API](https://github.com/kubernetes/kubernetes/issues/125500)
+- [Confusing use of TooManyRequests error for eviction](https://github.com/kubernetes/kubernetes/issues/106286)
 
 ### Goals
 
@@ -292,11 +295,13 @@ action to take when it observes an evacuation intent directed at that evacuator:
    - After a partial cleanup (e.g. storage migrated, notification sent) and if the application is
      still in an available state, the eviction API can be used to respect PodDisruptionBudgets.
 
-Evacuation should always end with a pod being terminated by one of the evacuators, or by an
+The end goal of an Evacuation is for a pod to be terminated by one of the evacuators, or by an
 eviction triggered by the evacuation controller. Usually this will also coincide with the deletion
 of the pod (evict or delete call). In some scenarios, the pod may only be terminated (e.g. by a
 remote call) if the pod `restartPolicy` allows it, to preserve the pod data for further processing
 or debugging.
+
+The evacuator can also choose whether it handles Evacuation cancellation.
 
 We should discourage the creation of preventive evacuations, so that they do not end up as
 another PDB. So we should design the API appropriately and also not allow behaviors that do not
@@ -545,8 +550,9 @@ metadata:
   namespace: blueberry
 ```
 
-The evacuator should observe the evacuation objects that match the pods that the evacuator manages.
-It should start the evacuation only if it observes `.status.activeEvacuatorClass` that matches the
+The evacuator should observe the evacuation objects that match the pods that the evacuator manages
+(e.g. through a labelSelector or ownerReferences). It should start the evacuation only if it
+observes the `.status.activeEvacuatorClass` in the Evacuation object that matches the
 `EVACUATOR_CLASS` it previously set in the annotation.
 
 If the evacuator is not interested in evacuating the pod, it should set
@@ -1204,6 +1210,8 @@ We expect no non-infra related flakes in the last month as a GA graduation crite
   and other components interested in using the Evacuation API.
 - Re-evaluate whether adding additional metrics and events would be helpful. And update the KEP
   with existing ones.
+- Consider adding information to a pod to indicate that it is being evacuated. For example via
+  a condition.
 
 #### GA
 

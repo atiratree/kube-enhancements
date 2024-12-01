@@ -17,6 +17,7 @@
     - [Story 3](#story-3)
     - [Story 4](#story-4)
     - [Story 5](#story-5)
+    - [Story 6](#story-6)
   - [Notes/Constraints/Caveats (Optional)](#notesconstraintscaveats-optional)
     - [Length Limitations for Pod Annotations and Evacuation Finalizers](#length-limitations-for-pod-annotations-and-evacuation-finalizers)
   - [Risks and Mitigations](#risks-and-mitigations)
@@ -36,7 +37,6 @@
       - [DELETE](#delete)
       - [CREATE, UPDATE, DELETE](#create-update-delete)
     - [Pod Admission](#pod-admission)
-    - [Pod API](#pod-api)
     - [Immutability of Evacuation Spec Fields](#immutability-of-evacuation-spec-fields)
   - [Evacuation Process](#evacuation-process)
   - [Follow-up Design Details for Kubernetes Workloads](#follow-up-design-details-for-kubernetes-workloads)
@@ -69,9 +69,14 @@
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
   - [Evacuation or Eviction subresource](#evacuation-or-eviction-subresource)
-  - [Pod API](#pod-api-1)
+  - [Pod API](#pod-api)
   - [Enhancing PodDisruptionBudgets](#enhancing-poddisruptionbudgets)
   - [Cancellation of Evacuation](#cancellation-of-evacuation)
+  - [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects)
+    - [Pod UID](#pod-uid)
+    - [Pod Name](#pod-name)
+    - [Pod UID and Pod Name Prefix](#pod-uid-and-pod-name-prefix)
+    - [Any Name](#any-name)
   - [Changes to the Eviction API](#changes-to-the-eviction-api)
 - [Infrastructure Needed (Optional)](#infrastructure-needed-optional)
 <!-- /toc -->
@@ -440,10 +445,10 @@ our case is the progress of the evacuation.
 There can be many evacuation instigators for a single Evacuation.
 
 When an instigator decides that a pod needs to be evacuated, it should create an Evacuation:
-- With a predictable and consistent name in the following format: `${POD_UID}-${POD_NAME_PREFIX}`.
-  The pod name may be only partial as the maximum allowed length of `POD_NAME_PREFIX` is limited
-  to 150 characters.
-- `.spec.podRef` should be set to fully identify the pod. Similar to the name, the UID should be
+- `.metadata.name` should be set to the pod UID to avoid conflicts and allow for easier lookups
+  as the name is predictable. For more details, see 
+  [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects) alternatives section.
+- `.spec.podRef` should be set to fully identify the pod. The name and the UID should be
   specified to ensure that we do not evacuate a pod with the same name that appears immediately
   after the previous pod is removed.
 - `.spec.progressDeadlineSeconds` should be set to a reasonable value. It is recommended to leave
@@ -453,7 +458,8 @@ When an instigator decides that a pod needs to be evacuated, it should create an
   field resolution across different instigators.
 
 It should also add itself to the Evacuation finalizers upon creation. If the evacuation already
-exists, the instigator should still add itself to the finalizers. The finalizers are used for:
+exists for this pod, the instigator should still add itself to the finalizers. The finalizers are
+used for:
 - Tracking the instigators of this evacuation intent. This is used for observability and to handle
   concurrency for multiple instigators requesting the cancellation. The evacuation can be
   cancelled/deleted once all instigators have requested the cancellation.  
@@ -645,10 +651,7 @@ type Evacuation struct {
 
 	// Object's metadata.
 	// .metadata.generateName is not supported.
-	// .metadata.name of the pod is expected to be in the ${POD_UID}-${POD_NAME_PREFIX} format.
-	// POD_UID is pod's .metadata.uid.
-	// POD_NAME_PREFIX is a prefix of up to 150 characters of pod's .metadata.name. The full pod
-	// name should be set if less than or equal to 150 characters.
+	// .metadata.name should match the .metadata.uid of the pod being evacuated. 
 	// The labels of the evacuation object will be merged with pod's .metadata.labels. The labels
 	// of the pod have a preference.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
@@ -826,22 +829,13 @@ Name of the Evacuation object must be unique and predictable for each pod to pre
 of multiple Evacuations for the same pod. We do not expect the evacuators to support interaction
 with multiple Evacuations for a pod.
 
-`.metadata.generateName` is not supported.
-`.metadata.name` of the pod is expected to be in the format `${POD_UID}-${POD_NAME_PREFIX}`.
- The `POD_UID` is there for uniqueness and the `POD_NAME_PREFIX` is there for a user convenience.
+`.metadata.generateName` is not supported. If it is set, the request will be rejected.
 
-- The `POD_UID` (length [36 characters](https://pkg.go.dev/github.com/google/uuid#UUID.String))
-  must be identical to `.spec.podRef.uid` or the request will be rejected.
-- The maximum length of the `POD_NAME_PREFIX` is 150 characters. Even though, the maximum length of
-  the name is 253 characters and the length of `POD_UID` is 36 characters, we leave 66 characters
-  for a potential future extension. If the pod name is less than or equal to 150 characters, then
-  the `POD_NAME_PREFIX` must be identical to `.spec.podRef.name`. If the pod name length is
-  greater, then the `POD_NAME_PREFIX` must be a prefix of `.spec.podRef.name` and have a length of
-  150 characters. If this is not met, the request will be rejected.
-
-
+`.metadata.name` must be identical to `.spec.podRef.uid` or the request will be rejected.
 The Pod matching the `.spec.podRef.name` will be obtained from the admission plugin lister. If the
-`.spec.podRef.uid` does not match with the pod's UID, the request will be rejected.
+`.spec.podRef.uid` does not match with the pod's UID, the request will be rejected. For more
+details, see [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects) section in
+the Alternatives.
 
 `.spec.evacuators` are set according to the pod's annotations (see [Evacuator](#evacuator) and
 [Evacuation API](#evacuation-api)).
@@ -880,24 +874,6 @@ should be checked on pod admission:
   `ROLE=controller`. If there is a need for a larger number of evacuators, the current use case
   should be re-evaluated. Limiting the number of evacuators ensures that the eviction cannot be
   blocked indefinitely by setting abnormally large number of these annotations on a pod.
-
-#### Pod API
-
-Evacuation name depends on the pod UID to have a relatively short length (36 characters). We can put the
-following comment above the pod's meta to express this dependency
-
-```go
-// Pod is a collection of containers that can run on a host. This resource is created
-// by clients and scheduled onto hosts.
-type Pod struct {
-	metav1.TypeMeta `json:",inline"`
-	// Standard object's metadata.
-	// .metadata.uid has a xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.
-	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-	...
-```
 
 #### Immutability of Evacuation Spec Fields
 
@@ -1580,6 +1556,78 @@ fails to evict multiple pods in a loop (even with a backoff), many requests to t
 degrade cluster performance. By deleting the NodeMaintenance and associated Evacuations, the
 administrator can break the loop and buy time to understand which applications are blocking the
 node drain and asses whether they can be safely deleted.
+
+### The Name of the Evacuation Objects
+
+It would be useful for the name of the Evacuation object to be unique and predictable for each pod
+instance to prevent the creation of multiple Evacuations for the same pod. Because we do not expect
+the evacuators to support interaction with multiple Evacuations for a pod. We can also verify
+`.spec.podRef` field on admission.
+
+We could validate each Evacuation `.metadata.name` to have one of the following formats:
+
+#### Pod UID
+
+Pros:
+- Unique and conflict free.
+- Exact mapping of a Pod to an Evacuation. An Evacuation can look up a pod and vice versa.
+- Friendly to controllers (e.g. creation, lookup).
+
+Cons:
+- `.metadata.generateName` is not supported.
+- Not very user friendly. The workaround is to better format the output with the clients (e.g. kubectl).
+
+#### Pod Name
+
+Pros: 
+- User friendly.
+
+Cons:
+- `.metadata.generateName` is not supported.
+- Potential for conflict if an old Evacuation object exists and a pod with a new UID is created
+  with the same name.
+- Actors in the system might start to rely on the name alone, rather than the full reference in
+  `.spec.podRef.uid`, and mis-target pods.
+
+
+#### Pod UID and Pod Name Prefix
+
+`.metadata.name` of the pod is expected to be in the format `${POD_UID}-${POD_NAME_PREFIX}`.
+The `POD_UID` is there for uniqueness and the `POD_NAME_PREFIX` is there for a user convenience.
+
+- The `POD_UID` (length [36 characters](https://pkg.go.dev/github.com/google/uuid#UUID.String))
+  must be identical to `.spec.podRef.uid` or the request will be rejected.
+- The maximum length of the `POD_NAME_PREFIX` is 150 characters. Even though, the maximum length of
+  the name is 253 characters and the length of `POD_UID` is 36 characters, we leave 66 characters
+  for a potential future extension. If the pod name is less than or equal to 150 characters, then
+  the `POD_NAME_PREFIX` must be identical to `.spec.podRef.name`. If the pod name length is
+  greater, then the `POD_NAME_PREFIX` must be a prefix of `.spec.podRef.name` and have a length of
+  150 characters. If this is not met, the request will be rejected.
+
+Pros:
+- Unique and conflict free.
+- Partially user friendly.
+- Partially friendly to controllers (e.g. creation, lookup).
+
+Cons
+- `.metadata.generateName` is not supported.
+- Cumbersome to use.
+
+
+#### Any Name
+
+We would allow users to specify any name, and just check the `.spec.podRef` field on admission.
+
+Pros:
+- Versatility; users can use any name they see fit.
+- `.metadata.generateName` is supported.
+- Actors in the system have a greater incentive to use `.spec.podRef`.
+Cons:
+- Name conflict resolution is left up to the users, but as a workaround they can simply generate the
+  name.
+- Less consistent/user friendly. It is harder to match the pod for all the actors/controllers and
+  may result in an increased number of API requests to list all Evacuation objects.
+
 
 ### Changes to the Eviction API
 

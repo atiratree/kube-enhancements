@@ -510,14 +510,22 @@ annotation. This annotation is parsed into the `Evacuator` type in the [Evacuati
 - `EVACUATOR_CLASS`: should be unique evacuator's DNS subdomain, the maximum length is 54
   characters (`63 - len("priority_")`)
 - `PRIORITY` and `ROLE`
-  - `controller` should always set a `PRIORITY=10000` and `ROLE=controller`
-  - other evacuators should set `PRIORITY` according to their own needs (minimum value is 0,
-    maximum value is 100000). They can use the `controller` evacuator as a reference point, if
+  - `controller` should always set a `PRIORITY=10000` and `ROLE=controller`.
+  - Other evacuators should set `PRIORITY` according to their own needs (minimum value is 0,
+    maximum value is 100000). Higher priorities are selected first by the evacuation controller.
+    They can use the `controller` evacuator as a reference point, if
     they want to be run before or after the `controller` evacuator. They can also observe pod
     annotations and detect what other evacuators have been registered for the evacuation process.
     `ROLE` is optional and can be used as a signal to other evacuators. The `controller` value is
     reserved for pod controllers, but otherwise there is no guidance on how the third party
     evacuators should name their role.
+  - Priorities `9900-10100` are reserved for evacuators with a class that has the same parent
+    domain as the controller evacuator. Duplicate priorities are not allowed in this interval.
+  - The number of evacuator annotations is limited to 30 in the 9900-10100 interval and to 70
+    outside of this interval.
+
+More details about the pod and evacuator annotation admission rules can be found in
+[Pod Admission](#pod-admission).
 
 Example pod with evacuator annotations:
 
@@ -527,8 +535,10 @@ kind: Pod
 metadata:
   annotations:
     evacuation.coordination.k8s.io/priority_fallback-evacuator.rescue-company.com: "2000"
-    evacuation.coordination.k8s.io/priority_deployment.apps.k8s.io: "10000/controller"
+    evacuation.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
+    evacuation.coordination.k8s.io/priority_deployment.apps.k8s.io: "10001/higher-level-controller"
     evacuation.coordination.k8s.io/priority_sensitive-workload-operator.fruit-company.com: "11000/knowledgeable-app-specific"
+    evacuation.coordination.k8s.io/priority_horizontalpodautoscaler.autoscaling.k8s.io: "12000/hpa"
   labels:
     app: nginx
   name: sensitive-app
@@ -715,7 +725,7 @@ type LocalPodReference struct {
 // Evacuator information that allows you to identify the evacuator responding to this evacuation.
 // Pods can be annotated with
 // evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}: ${PRIORITY}/${ROLE}
-// evacuation.coordination.k8s.io/priority_deployment.apps.k8s.io: "10000/controller"
+// evacuation.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
 // annotations that can be parsed into the Evacuator struct when the Evacuation object is created
 // on admission.
 type Evacuator struct {
@@ -726,6 +736,12 @@ type Evacuator struct {
 	// Priority for this EvacuatorClass. Higher priorities are selected first by the evacuation
 	// controller. The evacuator that is the managing controller should set the value of this field
 	// to 10000 to allow both for preemption or evacuator fallback registration by other evacuators.
+	//
+	// Priorities 9900-10100 are reserved for evacuators with a class that has the same parent
+	// domain as the controller evacuator. Duplicate priorities are not allowed in this interval.
+	//
+	// The number of evacuator annotations is limited to 30 in the 9900-10100 interval and to 70
+	// outside of this interval.
 	// The minimum value is 0 and the maximum value is 100000.
 	// +required
 	Priority int32 `json:"priority" protobuf:"varint,2,opt,name=priority"`
@@ -870,10 +886,25 @@ should be checked on pod admission:
 - Only one annotation of this format can have a `ROLE=controller`.
 - The `controller` role should have a priority of `10000`. Other role or empty role cannot have a
   value of `10000`.
-- The number of these annotations is limited to 100. 1 slot is always reserved for the
-  `ROLE=controller`. If there is a need for a larger number of evacuators, the current use case
-  should be re-evaluated. Limiting the number of evacuators ensures that the eviction cannot be
-  blocked indefinitely by setting abnormally large number of these annotations on a pod.
+- Priorities in the `9900-10100` interval should be reserved for the sibling and descendant
+  domains of the controller role. This means that `EVACUATOR_CLASS=replicaset.apps.k8s.io` with a
+  `ROLE=controller` has a parent domain `apps.k8s.io` and any domain with that parent is allowed in
+  this interval. For example `deployment.apps.k8s.io` or `customfeature.replicaset.apps.k8s.io`.
+  This can be used by a controller that has its logic split between multiple components
+  (e.g. ReplicaSet + Deployment), and it ensures that 3rd party controllers cannot inject their
+  behavior in between a single vendor's predefined steps. And if there is a need to inject behavior,
+  the priority should be increased above `10100` or below `9900` for such an evacuator class. If
+  `ROLE=controller` is not set, the range `9900-10100` cannot be used.
+- The number of these annotations is limited to 100. 30 slots are always reserved for the
+  `ROLE=controller` and other evacuators with the same parent domain (interval `9900-10100`). 70
+  slots are reserved for the rest of the general evacuators outside this interval. If there is a
+  need for a larger number of evacuators, the current use case should be re-evaluated. Limiting the
+  number of evacuators ensures that the eviction cannot be blocked indefinitely by setting
+  an abnormally large number of these annotations on a pod.
+- To prevent misuse, we will maintain a list of allowed `*.k8s.io` evacuator classes. And reject
+  any classes outside the main Kubernetes project on admission.
+- Annotations with duplicate priorities are not allowed in the `9900-10100` interval, but are
+  allowed outside of this interval.
 
 #### Immutability of Evacuation Spec Fields
 

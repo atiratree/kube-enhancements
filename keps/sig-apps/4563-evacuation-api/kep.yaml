@@ -18,11 +18,13 @@ reviewers:
   - "@fabiand"
   - "@mmerkes"
   - "@pwschuurman"
-  - "@rptaylor"
+  - "@rptaylor"v
   - "@razo7"
   - "@sftim"
   - "@soltysh"
+  - "@thockin"
   - "@toVersus"
+  - "@tuibeovince"
 approvers:
   - "@dchen1107"
   - "@soltysh"
@@ -42,7 +44,7 @@ milestone:
 # The following PRR answers are required at alpha release
 # List the feature gate name and the components for which it must be enabled
 feature-gates:
-  - name: EvacuationAPI
+  - name: EvictionRequestAPI
     components:
       - kube-apiserver
       - kube-controller-manager

@@ -1,4 +1,4 @@
-# KEP-4563: Evacuation API
+# KEP-4563: EvictionRequest API
 
 <!-- toc -->
 - [Release Signoff Checklist](#release-signoff-checklist)
@@ -8,9 +8,9 @@
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
-  - [Evacuation Instigator](#evacuation-instigator)
-  - [Evacuee and Evacuator](#evacuee-and-evacuator)
-  - [Evacuation controller](#evacuation-controller)
+  - [Eviction Requester](#eviction-requester)
+  - [Pod and Interceptor](#pod-and-interceptor)
+  - [Eviction Request Controller](#eviction-request-controller)
   - [User Stories (Optional)](#user-stories-optional)
     - [Story 1](#story-1)
     - [Story 2](#story-2)
@@ -19,32 +19,34 @@
     - [Story 5](#story-5)
     - [Story 6](#story-6)
   - [Notes/Constraints/Caveats (Optional)](#notesconstraintscaveats-optional)
-    - [Length Limitations for Pod Annotations and Evacuation Finalizers](#length-limitations-for-pod-annotations-and-evacuation-finalizers)
+    - [Length Limitations for Pod Annotations and EvictionRequest Finalizers](#length-limitations-for-pod-annotations-and-evictionrequest-finalizers)
   - [Risks and Mitigations](#risks-and-mitigations)
     - [Disruptive Eviction](#disruptive-eviction)
 - [Design Details](#design-details)
-  - [Evacuation](#evacuation)
-  - [Evacuation Instigator](#evacuation-instigator-1)
-    - [Evacuation Instigator Finalizer](#evacuation-instigator-finalizer)
-  - [Evacuator](#evacuator)
-  - [Evacuation controller](#evacuation-controller-1)
-    - [Evacuator Class Selection](#evacuator-class-selection)
+  - [EvictionRequest](#evictionrequest)
+  - [Eviction Requester](#eviction-requester-1)
+    - [Eviction Requester Finalizer](#eviction-requester-finalizer)
+  - [Interceptor](#interceptor)
+  - [Eviction Request Controller](#eviction-request-controller-1)
+    - [Interceptor Class Selection](#interceptor-class-selection)
     - [Eviction](#eviction)
     - [Garbage Collection](#garbage-collection)
-  - [Evacuation API](#evacuation-api)
-    - [Evacuation Validation and Admission](#evacuation-validation-and-admission)
+  - [EvictionRequest API](#evictionrequest-api)
+    - [EvictionRequest Validation and Admission](#evictionrequest-validation-and-admission)
       - [CREATE](#create)
       - [DELETE](#delete)
       - [CREATE, UPDATE, DELETE](#create-update-delete)
     - [Pod Admission](#pod-admission)
-    - [Immutability of Evacuation Spec Fields](#immutability-of-evacuation-spec-fields)
-  - [Evacuation Process](#evacuation-process)
+    - [Immutability of EvictionRequest Spec Fields](#immutability-of-evictionrequest-spec-fields)
+  - [EvictionRequest Process](#evictionrequest-process)
   - [Follow-up Design Details for Kubernetes Workloads](#follow-up-design-details-for-kubernetes-workloads)
     - [ReplicaSet Controller](#replicaset-controller)
     - [Deployment Controller](#deployment-controller)
+      - [Deployment Pod Surge Example](#deployment-pod-surge-example)
     - [StatefulSet Controller](#statefulset-controller)
     - [DaemonSet and Static Pods](#daemonset-and-static-pods)
     - [HorizontalPodAutoscaler](#horizontalpodautoscaler)
+      - [HorizontalPodAutoscaler Pod Surge Example](#horizontalpodautoscaler-pod-surge-example)
     - [Descheduling and Downscaling](#descheduling-and-downscaling)
   - [Test Plan](#test-plan)
       - [Prerequisite testing updates](#prerequisite-testing-updates)
@@ -68,11 +70,11 @@
 - [Implementation History](#implementation-history)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
-  - [Evacuation or Eviction subresource](#evacuation-or-eviction-subresource)
+  - [EvictionRequest or Eviction subresource](#evictionrequest-or-eviction-subresource)
   - [Pod API](#pod-api)
   - [Enhancing PodDisruptionBudgets](#enhancing-poddisruptionbudgets)
-  - [Cancellation of Evacuation](#cancellation-of-evacuation)
-  - [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects)
+  - [Cancellation of EvictionRequest](#cancellation-of-evictionrequest)
+  - [The Name of the EvictionRequest Objects](#the-name-of-the-evictionrequest-objects)
     - [Pod UID](#pod-uid)
     - [Pod Name](#pod-name)
     - [Pod UID and Pod Name Prefix](#pod-uid-and-pod-name-prefix)
@@ -104,10 +106,10 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 - [x] (R) Design details are appropriately documented
 - [x] (R) Test plan is in place, giving consideration to SIG Architecture and SIG Testing input (including test refactors)
   - [ ] e2e Tests for all Beta API Operations (endpoints)
-  - [ ] (R) Ensure GA e2e tests meet requirements for [Conformance Tests](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/conformance-tests.md) 
+  - [ ] (R) Ensure GA e2e tests meet requirements for [Conformance Tests](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/conformance-tests.md)
   - [ ] (R) Minimum Two Week Window for GA e2e tests to prove flake free
 - [x] (R) Graduation criteria is in place
-  - [ ] (R) [all GA Endpoints](https://github.com/kubernetes/community/pull/1806) must be hit by [Conformance Tests](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/conformance-tests.md) 
+  - [ ] (R) [all GA Endpoints](https://github.com/kubernetes/community/pull/1806) must be hit by [Conformance Tests](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/conformance-tests.md)
 - [ ] (R) Production readiness review completed
 - [ ] (R) Production readiness review approved
 - [x] "Implementation History" section is up-to-date for milestone
@@ -126,22 +128,22 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 ## Summary
 
 There are many issues with today's Eviction API and PodDisruptionBudgets that are of great concern
-to cluster admins and application owners. These issue range from insufficient data safety or
-application availability to node draining issues.
+to cluster administrators and application owners. These issues range from insufficient data safety,
+application availability, autoscaling to node draining issues.
 
-This KEP proposes to add a new declarative Evacuation API to manage the evacuation of pods. Its
-mission is to allow for a cooperative evacuation (removal) of a pod, usually in order to run the
-pod on another node. If the owner of the pod does not cooperate, the evacuation will try to resort
-to a pod eviction (API initiated Eviction).
+This KEP proposes to add a new declarative EvictionRequest API to manage the eviction of pods. Its
+mission is to allow for a cooperative termination of a pod, usually in order to run the pod on
+another node. If the owner of the pod does not cooperate, the eviction request will try to resort
+to a pod eviction (API-initiated Eviction).
 
 This new API can be used to implement additional capabilities around node draining, pod
-descheduling, or as a general interface between applications and/or controllers. It would provide
-additional safety and observability guarantees and prevent bad practices as opposed to just using
-the current Eviction API endpoint and PodDisruptionBudgets.
+descheduling, autoscaling, or as a general interface between applications and/or controllers. It
+would provide additional safety and observability guarantees and prevent bad practices as opposed
+to just using the current Eviction API endpoint and PodDisruptionBudgets.
 
 ## Motivation
 
-Many of today's solutions rely on eviction (API-initiated Eviction) as the goto-safe way to remove
+Many of today's solutions rely on API-initiated eviction as the goto-safe way to remove
 a pod from a node (kubectl drain, descheduler, cluster autoscaler, partially scheduler preemption).
 Unfortunately, this is done in an application agnostic way and can cause many problems.
 
@@ -177,7 +179,8 @@ The major issues are:
    and [many other issues](https://github.com/kubernetes/kubernetes/issues/124306#issuecomment-2493091257).
 4. Descheduler does not allow postponing eviction for applications that are unable to be evicted
    immediately. This can result in descheduling of incorrect set of pods. This is outlined in the
-   KEP [kubernetes-sigs/descheduler#1354](https://github.com/kubernetes-sigs/descheduler/pull/1354).
+   decheduler [KEP-1397](https://github.com/kubernetes-sigs/descheduler/blob/master/keps/1397-evictions-in-background/README.md)
+   and [kubernetes-sigs/descheduler#1466](https://github.com/kubernetes-sigs/descheduler/pull/1466).
 5. Graceful deletion of DaemonSet pods is currently only supported as part of (Linux) graceful node
    shutdown. The length of the shutdown is again not application specific and is set cluster-wide
    (optionally by priority) by the cluster admin. This does not take into account
@@ -192,12 +195,13 @@ The major issues are:
 7. [Affinity Based Eviction](https://github.com/kubernetes/enhancements/issues/4328) is an upcoming
    feature that would like to introduce the `RequiredDuringSchedulingRequiredDuringExecution`
    nodeAffinity option to remove pods from nodes that do not match this affinity. The controller
-   proposed by this feature would like to use the Evacuation API for the disruption safety and
-   observability reasons. It can also leave the eviction logic and reconciliation to the evacuation
-   controller and reducing the maintenance burden. Discussed in the KEP [kubernetes/enhancements#4329](https://github.com/kubernetes/enhancements/pull/4329).
+   proposed by this feature would like to use the EvictionRequest API for the disruption safety and
+   observability reasons. It can also leave the eviction logic and reconciliation to the eviction
+   request controller and reducing the maintenance burden. Discussed in the KEP
+   [kubernetes/enhancements#4329](https://github.com/kubernetes/enhancements/pull/4329).
 
 This KEP is a prerequisite for the [Declarative Node Maintenance KEP](https://github.com/kubernetes/enhancements/pull/4213),
-which describes other issues and consequences that would be solved by the Evacuation API.
+which describes other issues and consequences that would be solved by the EvictionRequest API.
 
 Some applications solve the disruption problem by introducing validating admission webhooks.
 This has some drawbacks. The webhooks are not easily discoverable by cluster admins. And they can
@@ -235,56 +239,80 @@ For completeness here is a complete list of upstream open PDB issues. Most are r
 
 ### Goals
 
-- Introduce new `evacuation.coordination.k8s.io` API and evacuation controller.
-- Block eviction (Eviction API) of pods that support the evacuation process, unless the evacuation process fails.
+- Introduce new EvictionRequest API (`evictionrequest.coordination.k8s.io`) and eviction request
+  controller.
+- Allow the EvictionRequest API to be extended with a set of interceptors for each pod.
+- Use API-initiated Eviction API of pods that support the eviction request process, only if there
+  are no active interceptors.
 
 ### Non-Goals
 
-- Implement evacuation capabilities in Kubernetes workloads (ReplicaSet, Deployment, etc.).
-- Synchronizing of the evacuation status to the pod status.
-- Introduce the evacuation concept for types other than pods.
-- Synchronize all pod termination mechanisms (see #4 in the [Motivation](#motivation) section), so that they do
-  not terminate pods under NodeMaintenance/Evacuation.
+- Implement eviction request capabilities in Kubernetes workloads (ReplicaSet, Deployment, etc.).
+- Implement eviction request capabilities for autoscaling, de/scheduling.
+- Synchronizing of the eviction request status to the pod status.
+- Introduce the eviction request concept for types other than pods.
+- Synchronize all pod termination mechanisms (see #4 in the [Motivation](#motivation) section), so that they
+  do not terminate pods under NodeMaintenance/EvictionRequest.
 
 ## Proposal
 
-We will introduce a new term called evacuation. This is a contract between the evacuation instigator,
-the evacuee, and the evacuator. The contract is enforced by the API and an evacuation controller.
-We can think of evacuation as a managed and safer alternative to eviction.
+We will introduce a new declarative API called EvictionRequest, whose purpose is to coordinate the
+eviction of a pod from a node. It creates a contract between the eviction requester, the pod, and
+the interceptor (described later). The contract is enforced by the eviction request controller, the
+API type and the API admission.
 
-### Evacuation Instigator
+Pods will carry a new set of annotations about which interceptors are involved in their lifecycle.
+This would allow multiple actors to take an action before the pod is terminated. Each interceptor
+has a priority, and only one at a time may progress with the eviction. If there is no interceptor,
+or the last interceptor (lowest priority) has finished without terminating the pod, the eviction
+request controller will attempt to evict the pod using the existing API-initiated eviction.
 
-The evacuation instigator can be any entity in the system: node maintenance controller, descheduler,
-cluster autoscaler, or any application/controller interfacing with the affected application/pods
-(evacuee).
+Multiple requesters can request the eviction of the same pod, and optionally withdraw their request
+in certain scenarios.
 
-The instigator's responsibility is to communicate an intent to a pod that it should be evacuated,
-according to the instigator's own internal rules. It should reconcile its intent in case the intent
-is removed by a third party. And it should remove its intent when the evacuation is no longer necessary.
+We can think of EvictionRequest as a managed and safer alternative to eviction.
 
-Example evacuation triggers:
+See some practical use cases for this feature:
+1. Ability to upscale first before terminating the pods with a Deployment: [Deployment Pod Surge Example](#deployment-pod-surge-example)
+   based on the [EvictionRequest Process](#evictionrequest-process).
+2. Ability to upscale first before terminating the pods with HPA: [HorizontalPodAutoscaler Pod Surge Example](#horizontalpodautoscaler-pod-surge-example)
+   based on the [EvictionRequest Process](#evictionrequest-process).
+3. Ability to select which pods to terminate when downscaling an application: [Descheduling and Downscaling](#descheduling-and-downscaling)
+
+### Eviction Requester
+
+The eviction requester can be any entity in the system: node maintenance controller, descheduler,
+cluster autoscaler, or any application/controller interfacing with the affected application/pods.
+
+The requester's responsibility is to communicate an intent to a pod that it should be evicted via
+the EvictionRequest, according to the requester's own internal rules. It should reconcile its intent
+in case the intent is removed by a third party. And it should remove its intent when the eviction
+request is no longer necessary.
+
+Example eviction request triggers:
 - Node maintenance controller: node maintenance triggered by an admin.
 - Descheduler: descheduling triggered by a descheduling rule.
 - Cluster autoscaler: node downscaling triggered by a low node utilization.
 - HPA: pod downscaling or rebalancing.
 
-It is understood that multiple evacuation instigators may request evacuation of the same pod at the
-same time. The instigators should coordinate their intent and not remove the evacuation until all
-instigators have dropped their intent.
+It is understood that multiple eviction requesters may request eviction of the same pod at the same
+time. The requesters should coordinate their intent and not remove the eviction request until all
+requesters have dropped their intent.
 
-### Evacuee and Evacuator
+### Pod and Interceptor
 
-The evacuee can be any pod. There can be multiple evacuators for a single pod, and they should all
-advertise which pods they are responsible for. Normally, the owner/controller of the pod is the main
-evacuator. In a special case, the evacuee can be its own evacuator. The evacuator should decide what
-action to take when it observes an evacuation intent directed at that evacuator:
-1. It can reject the evacuation and wait for the pod to be evacuated by another evacuator or evicted
-   by the evacuation controller.
-2. It can do nothing and wait for the pod to be evacuated by another evacuator or evicted by the
-   evacuation controller. This is discouraged because it is slower than a simple rejection.
-3. It can start the evacuation and periodically respond to the evacuation intent to signal that the
-   evacuation is in progress and not stuck. Evacuation is at the discretion of the evacuator and
-   can take many forms:
+Any pod can be the subject to an eviction request. There can be multiple interceptors for a single
+pod, and they should all advertise which pods they are responsible for. Normally, the
+owner/controller of the pod is the main interceptor. In a special case, the pod can be its own
+interceptor. The interceptor should decide what action to take when it observes an eviction request
+intent directed at that interceptor:
+1. It can reject the eviction request and wait for the pod to be intercepted by another interceptor
+   or evicted by the eviction request controller.
+2. It can do nothing and wait for the pod to be intercepted by another interceptor or evicted by the
+   eviction request controller. This is discouraged because it is slower than a simple rejection.
+3. It can start the eviction logic and periodically respond to the eviction request intent to signal
+   that the eviction request is in progress and not stuck. The eviction logic is at the discretion
+   of the interceptor and can take many forms:
    - Migration of data (both persistent and ephemeral) from one node to another.
    - Waiting for a cleanup and release of important resources held by the pod.
    - Waiting for important computations to complete.
@@ -293,50 +321,51 @@ action to take when it observes an evacuation intent directed at that evacuator:
      application should have additional logic to distinguish whether a disruption of a particular
      pod will disrupt the application as a whole.
    - After a partial cleanup (e.g. storage migrated, notification sent) and if the application is
-     still in an available state, the eviction API can be used to respect PodDisruptionBudgets.
+     still in an available state, the API-initiated eviction can be used to respect
+     PodDisruptionBudgets.
 
-The end goal of an Evacuation is for a pod to be terminated by one of the evacuators, or by an
-eviction triggered by the evacuation controller. Usually this will also coincide with the deletion
-of the pod (evict or delete call). In some scenarios, the pod may only be terminated (e.g. by a
-remote call) if the pod `restartPolicy` allows it, to preserve the pod data for further processing
-or debugging.
+The end goal of an EvictionRequest is for a pod to be terminated by one of the interceptors, or by
+an API-initiated eviction triggered by the eviction request controller. Usually this will also
+coincide with the deletion of the pod (evict or delete call). In some scenarios, the pod may only be
+terminated (e.g. by a remote call) if the pod `restartPolicy` allows it, to preserve the pod data
+for further processing or debugging.
 
-The evacuator can also choose whether it handles Evacuation cancellation.
+The interceptor can also choose whether it handles EvictionRequest cancellation.
 
-We should discourage the creation of preventive evacuations, so that they do not end up as
+We should discourage the creation of preventive EvictionRequests, so that they do not end up as
 another PDB. So we should design the API appropriately and also not allow behaviors that do not
-conform to the evacuation contract.
+conform to the eviction request contract.
 
-### Evacuation controller
+### Eviction Request Controller
 
-In order to fully enforce the evacuation contract and prevent code duplication among evacuation
-instigators, we will introduce a new controller called the evacuation controller.
+In order to fully enforce the eviction request contract and prevent code duplication among eviction
+requesters, we will introduce a new controller called the eviction request controller.
 
-Its responsibility is to observe evacuation requests from instigators and periodically check that
-evacuators are making progress in evacuating evacuees. It is important to see a consistent effort
-by the evacuators to reconcile the progress of the evacuation. This is important to prevent stuck
-evacuations that could bring node maintenance to a halt. If the evacuation controller detects
-that the evacuation progress updates have stopped, it will assign another evacuator. If there is
-no other evacuator available, it will resort to pod eviction by calling the eviction API (taking
-PodDisruptionBudgets into consideration).
+Its responsibility is to observe eviction requests from requesters and periodically check that
+interceptors are making progress in evicting/terminating pods. It is important to see a consistent
+effort by the interceptors to reconcile the progress of the eviction request. This is important to
+prevent stuck eviction requests that could bring node maintenance to a halt. If the eviction request
+controller detects that the eviction request progress updates have stopped, it will assign another
+interceptor. If there is no other interceptor available, it will resort to pod eviction by calling
+the eviction API (taking PodDisruptionBudgets into consideration).
 
-It is also responsible for garbage collection/deletion of existing evacuations whose pods have
-reached terminal phase(`Succeeded` or `Failed`) or have been deleted from etcd storage.
+It is also responsible for garbage collection/deletion of existing eviction requests whose pods have
+reached terminal phase (`Succeeded` or `Failed`) or have been deleted from etcd storage.
 
 ### User Stories (Optional)
 
 #### Story 1
 
 As a cluster admin I want high-level components like node maintenance (planned replacement of
-kubectl drain), scheduler, descheduler to use the Evacuation API to gracefully remove pods from a
-set of nodes. I also want to see the progress of ongoing evacuations and be able to debug them if
-something goes wrong. This means to:
-- Easily identify pods that have accepted evacuation and are making progress. If possible to be
-  able to see evacuation's ETA.
-- Identify pods that should be evicted instead of evacuated and to distinguish pods that are
-  failing eviction.
-- See additional debug information from the active evacuator and be able to identify all the
-  registered evacuators.
+kubectl drain), scheduler, descheduler to use the EvictionRequest API to gracefully remove pods from
+a set of nodes. I also want to see the progress of ongoing eviction requests and be able to debug
+them if something goes wrong. This means to:
+- Easily identify pods that have accepted eviction requests and are making progress. If possible to
+  be able to see eviction request's ETA.
+- Identify pods that are being evicted by the API-intiated eviction instead of being intercepted and
+  to be able to distinguish pods that are failing eviction.
+- See additional debug information from the active interceptor and be able to identify all the
+  registered interceptors.
 
 #### Story 2
 
@@ -348,9 +377,9 @@ downscaling.
 #### Story 3
 
 As an application owner, I want to have a custom logic tailored to my application for migration,
-down-scaling, or removal of pods. I want to be able to easily override the default evacuation
+down-scaling, or removal of pods. I want to be able to easily override the default eviction request
 process, including the eviction and PDBs, available to workloads. To achieve this, I also need to
-be able to identify other evacuators and an order in which they will run.
+be able to identify other actors (interceptors) and an order in which they will run.
 
 #### Story 4
 
@@ -373,53 +402,53 @@ purposes after it has reached the terminal phase (`Succeeded` or `Failed`).
 
 ### Notes/Constraints/Caveats (Optional)
 
-#### Length Limitations for Pod Annotations and Evacuation Finalizers
+#### Length Limitations for Pod Annotations and EvictionRequest Finalizers
 
-We use the following finalizers in Evacuation objects:
-`evacuation.coordination.k8s.io/instigator_${EVACUATION_INSTIGATOR_SUBDOMAIN}`.
+We use the following finalizers in EvictionRequest objects:
+`requester.evictionrequest.coordination.k8s.io/name_${EVICTION_REQUESTER_SUBDOMAIN}`.
 
 We use the following annotations in Pod objects:
-`evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}: ${PRIORITY}/${ROLE}`.
+`interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS}: ${PRIORITY}/${ROLE}`.
 
 Key validation for both of these is subject to [IsQualifiedName](https://github.com/kubernetes/kubernetes/blob/cae35dba5a3060711a2a3f958537003bc74a59c0/staging/src/k8s.io/apimachinery/pkg/util/validation/validation.go#L42)
 validation. The key consists of `prefix/name`. The maximum length of the name is 63 characters,
-which may not always be enough for `EVACUATION_INSTIGATOR_SUBDOMAIN` and `EVACUATOR_CLASS` (also
-DNS subdomain) after adding the length of `instigator_` and `priority_` respectively.
+which may not always be enough for `EVICTION_REQUESTER_SUBDOMAIN` and `INTERCEPTOR_CLASS` (also
+DNS subdomain) after adding the length of `name_` and `priority_` respectively.
 
 If the name component of the key is greater than 63 characters, it is recommended to use a unique
 shortcut of your subdomain name.
 For example, `deployment.apps.k8s.io` instead of `deployment.apps.kubernetes.io`.
 
-We do not expect a large number of instigators and evacuators. If this becomes a larger problem in
+We do not expect a large number of requesters and interceptors. If this becomes a larger problem in
 the future, we can implement an additional scheme:
 
 ```yaml
 annotations:
-  evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS_HASH}: ${PRIORITY}/${ROLE}
-  evacuation.coordination.k8s.io/hash_${EVACUATOR_CLASS_HASH}: ${EVACUATOR_CLASS}
+  interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS_HASH}: ${PRIORITY}/${ROLE}
+  interceptor.evictionrequest.coordination.k8s.io/hash_${INTERCEPTOR_CLASS_HASH}: ${INTERCEPTOR_CLASS}
 ```
 
 which would result in
 
 ```yaml
 annotations:
-  evacuation.coordination.k8s.io/priority_7bb77f87dc: "11000/knowledgeable-app-specific"
-  evacuation.coordination.k8s.io/hash_7bb77f87dc: "sensitive-workload-operator.tom-and-jerry-delicious-fruit-company.com"
+  interceptor.evictionrequest.coordination.k8s.io/priority_7bb77f87dc: "11000/knowledgeable-app-specific"
+  interceptor.evictionrequest.coordination.k8s.io/hash_7bb77f87dc: "sensitive-workload-operator.tom-and-jerry-delicious-fruit-company.com"
 ```
 
 `7bb77f87dc` value is a hash of `sensitive-workload-operator.tom-and-jerry-delicious-fruit-company.com`
 
 ### Risks and Mitigations
 
-If there is no evacuator, and the application has insufficient availability and a blocking PDB or
-blocking validating admission webhook, then the evacuation controller will enter into an eviction
-cold loop. To mitigate this we will increment `.status.failedEvictionCounter` and
-`evacuation_controller_evictions` metric.
+If there is no interceptor, and the application has insufficient availability and a blocking PDB or
+blocking validating admission webhook, then the eviction request controller will enter into an
+API-initiated eviction cold loop. To mitigate this we will increment
+`.status.failedAPIEvictionCounter` and `evictionrequest_controller_evictions` metric.
 
-An evacuator could reconcile the status properly without making any progress. It is thus
-recommended to check `creationTimestamp` of the Evacuations and observe
-`evacuation_controller_active_evacuator` metric to see how much it takes for an evacuator to
-complete the evacuation. This metric can be also used to implement additional alerts.
+An interceptor could reconcile the status properly without making any progress. It is thus
+recommended to check `creationTimestamp` of the EvictionRequests and observe
+`evictionrequest_controller_active_interceptor` metric to see how much it takes for an interceptor
+to complete the eviction. This metric can be also used to implement additional alerts.
 
 #### Disruptive Eviction
 
@@ -431,291 +460,300 @@ we can see many administrators override these default settings and many componen
 indiscriminately. There are also many ways that users use to prevent the eviction;
 PodDisruptionBudgets, validating admission webhooks, or just plain HA. Users who want to protect
 their applications in today's clusters should already be aware that they should be able to handle
-sudden evictions. Therefore, it should be okay for the evacuation controller to evict these pods.
+sudden evictions. Therefore, it should be okay for the eviction request controller to evict these
+pods.
 
 To mitigate the sudden eviction problem, users should use PodDisruptionBudgets or HA.
 
 ## Design Details
 
-### Evacuation
+### EvictionRequest
 
-We will introduce a new type called `evacuation.coordination.k8s.io`  to enforce the contract
-between the evacuation instigators and the evacuators. This type is a bit similar to
+We will introduce a new type called `evictionrequest.coordination.k8s.io` to enforce the contract
+between the eviction requesters and the interceptors. This type is a bit similar to
 `leases.coordination.k8s.io` in that it requires multiple actors to synchronize the state. Which in
-our case is the progress of the evacuation.
+our case is the progress of the eviction.
 
-### Evacuation Instigator
-[Evacuation Instigator](#evacuation-instigator) section provides a general overview.
+### Eviction Requester
+[Eviction Requester](#eviction-requester) section provides a general overview.
 
-There can be many evacuation instigators for a single Evacuation.
+There can be many eviction requesters for a single EvictionRequest.
 
-When an instigator decides that a pod needs to be evacuated, it should create an Evacuation:
+When a requester decides that a pod needs to be evicted, it should create an EvictionRequest:
 - `.metadata.name` should be set to the pod UID to avoid conflicts and allow for easier lookups
-  as the name is predictable. For more details, see 
-  [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects) alternatives section.
+  as the name is predictable. For more details, see
+  [The Name of the EvictionRequest Objects](#the-name-of-the-evictionrequest-objects) alternatives section.
 - `.spec.podRef` should be set to fully identify the pod. The name and the UID should be
-  specified to ensure that we do not evacuate a pod with the same name that appears immediately
+  specified to ensure that we do not evict a pod with the same name that appears immediately
   after the previous pod is removed.
 - `.spec.progressDeadlineSeconds` should be set to a reasonable value. It is recommended to leave
-  it at the default value of 1800 (30m) to allow for potential evacuator disruptions.
-- `.spec.evacuators` value will be resolved on the Evacuation admission from the pod and should
-  ideally not be set by the instigator. This is done to maintain consistent `.spec.evacuators`
-  field resolution across different instigators.
+  it at the default value of 1800 (30m) to allow for potential interceptor disruptions.
+- `.spec.interceptors` value will be resolved on the EvictionRequest admission from the pod and
+  should ideally not be set by the requester. This is done to maintain consistent
+  `.spec.interceptors` field resolution across different requesters.
 
-It should also add itself to the Evacuation finalizers upon creation. If the evacuation already
-exists for this pod, the instigator should still add itself to the finalizers. The finalizers are
-used for:
-- Tracking the instigators of this evacuation intent. This is used for observability and to handle
-  concurrency for multiple instigators requesting the cancellation. The evacuation can be
-  cancelled/deleted once all instigators have requested the cancellation.  
-- Processing the evacuation result by the instigator once the evacuation is complete.
+It should also add itself to the EvictionRequest finalizers upon creation. If the eviction request
+already exists for this pod, the requester should still add itself to the finalizers. The finalizers
+are used for:
+- Tracking the requesters of this eviction request intent. This is used for observability and to
+  handle concurrency for multiple requesters asking for the cancellation. The eviction request can
+  be cancelled/deleted once all requesters have asked for the cancellation.
+- Processing the eviction request result by the requester once the eviction process is complete.
 
-If the evacuation is no longer needed, the instigator should remove itself from the finalizers.
-The evacuation will be then deleted by the evacuation controller. In case the evacuator has set
-`.status.evacuationCancellationPolicy` to `Forbid`, the evacuation process cannot be cancelled, and
-the evacuation controller will wait to delete the evacuation until the pod is fully terminated.
+If the eviction is no longer needed, the requester should remove itself from the finalizers of the
+EvictionRequest. The eviction request will be then deleted by the eviction request controller. In
+case the interceptor has set `.status.evictionRequestCancellationPolicy` to `Forbid`, the eviction
+process cannot be cancelled, and the eviction request controller will wait to delete the eviction
+request until the pod is fully terminated.
 
-#### Evacuation Instigator Finalizer
-To distinguish between instigator and other finalizers, instigators should use finalizers in the
-following format: `evacuation.coordination.k8s.io/instigator_${EVACUATION_INSTIGATOR_SUBDOMAIN}`.
-For example, the node maintenance instigator would use the
-`evacuation.coordination.k8s.io/instigator_nodemaintenance.k8s.io` finalizer.
+#### Eviction Requester Finalizer
+To distinguish between requester and other finalizers, requesters should use finalizers in the
+following format: `requester.evictionrequest.coordination.k8s.io/name_${EVICTION_REQUESTER_SUBDOMAIN}`.
+For example, the node maintenance eviction requester would use the
+`requester.evictionrequest.coordination.k8s.io/name_nodemaintenance.k8s.io` finalizer.
 
-Instigator finalizers with `evacuation.coordination.k8s.io/instigator_` prefix/qualified name prefix
-are automatically removed upon pod removal by the evacuation controller. If the instigator needs to
-perform additional final tasks before the Evacuation object is removed, it should create a second
-finalizer without this well-known prefix.
+Requester finalizers with `requester.evictionrequest.coordination.k8s.io/name_` prefix/qualified
+name prefix are automatically removed upon pod removal by the eviction request controller. If the
+requester needs to perform additional final tasks before the EvictionRequest object is removed, it
+should create a second finalizer without this well-known prefix.
 
-The evacuation instigator should only add and remove its own finalizer and should not touch other
-finalizers with the `evacuation.coordination.k8s.io/` prefix.
+The eviction requester should only add and remove its own finalizer and should not touch other
+finalizers with the `requester.evictionrequest.coordination.k8s.io/` or
+`evictionrequest.coordination.k8s.io/` prefix.
 
-### Evacuator
+### Interceptor
 
-[Evacuee and Evacuator](#evacuee-and-evacuator) section provides a general overview.
+[Pod and Interceptor](#pod-and-interceptor) section provides a general overview.
 
-There can be multiple evacuators for a single pod, which can be given control of the evacuation by
-the evacuation controller.
+There can be multiple interceptors for a single pod, which can be given control of the eviction
+process by the eviction request controller.
 
-We can distinguish 4 different kinds of evacuators:
-- `partial`: it handles only a part of the evacuation process (e.g. releasing one kind of resource).
-  This evacuator should not terminate the pod.
+We can distinguish 4 different kinds of interceptors:
+- `partial`: it handles only a part of the eviction process (e.g. releasing one kind of resource).
+  This interceptor should not terminate the pod.
 - `knowledgeable`: has more knowledge (e.g. specific to the deployed application) about how to
-  handle a more graceful evacuation than the controller of the pod (e.g. StatefulSet, Deployment).
+  handle a more graceful eviction than the controller of the pod (e.g. StatefulSet, Deployment).
   This can result in the termination of the pod.
-- `controller`: handles full graceful evacuation in a generic way and should result in a pod
-  termination. It can be preempted by a `knowledgeable` evacuator.
-- `fallback`: can handle evacuation if all previous evacuators have failed. This means that
-  `knowledgeable` or `controller` evacuators have either reported no progress, or are simply not
+- `controller`: handles full graceful eviction in a generic way and should result in a pod
+  termination. It can be preempted by a `knowledgeable` interceptor.
+- `fallback`: can handle eviction if all previous interceptors have failed. This means that
+  `knowledgeable` or `controller` interceptors have either reported no progress, or are simply not
   implemented for the target pod.
 
-The evacuator should first mark the pods it is interested in evacuating (either partially or fully)
-with the `evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}: ${PRIORITY}/${ROLE}`
-annotation. This annotation is parsed into the `Evacuator` type in the [Evacuation API](#evacuation-api).
+The interceptor should first mark the pods it is interested in evicting/intercepting (either
+partially or fully) with the
+`interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS}: ${PRIORITY}/${ROLE}`
+annotation. This annotation is parsed into the `Interceptor` type in the [EvictionRequest API](#evictionrequest-api).
 
-- `EVACUATOR_CLASS`: should be unique evacuator's DNS subdomain, the maximum length is 54
+- `INTERCEPTOR_CLASS`: should be unique interceptor's DNS subdomain, the maximum length is 54
   characters (`63 - len("priority_")`)
 - `PRIORITY` and `ROLE`
   - `controller` should always set a `PRIORITY=10000` and `ROLE=controller`.
-  - Other evacuators should set `PRIORITY` according to their own needs (minimum value is 0,
-    maximum value is 100000). Higher priorities are selected first by the evacuation controller.
-    They can use the `controller` evacuator as a reference point, if
-    they want to be run before or after the `controller` evacuator. They can also observe pod
-    annotations and detect what other evacuators have been registered for the evacuation process.
-    `ROLE` is optional and can be used as a signal to other evacuators. The `controller` value is
-    reserved for pod controllers, but otherwise there is no guidance on how the third party
-    evacuators should name their role.
-  - Priorities `9900-10100` are reserved for evacuators with a class that has the same parent
-    domain as the controller evacuator. Duplicate priorities are not allowed in this interval.
-  - The number of evacuator annotations is limited to 30 in the 9900-10100 interval and to 70
+  - Other interceptors should set `PRIORITY` according to their own needs (minimum value is 0,
+    maximum value is 100000). Higher priorities are selected first by the eviction request
+    controller. They can use the `controller` interceptor as a reference point, if they want to be
+    run before or after the `controller` interceptor. They can also observe pod annotations and
+    detect what other interceptors have been registered for the eviction process. `ROLE` is optional
+    and can be used as a signal to other interceptors. The `controller` value is reserved for pod
+    controllers, but otherwise there is no guidance on how the third party interceptors should name
+    their role.
+  - Priorities `9900-10100` are reserved for interceptors with a class that has the same parent
+    domain as the controller interceptor. Duplicate priorities are not allowed in this interval.
+  - The number of interceptor annotations is limited to 30 in the 9900-10100 interval and to 70
     outside of this interval.
 
-More details about the pod and evacuator annotation admission rules can be found in
+More details about the pod and interceptor annotation admission rules can be found in
 [Pod Admission](#pod-admission).
 
-Example pod with evacuator annotations:
+Example pod with interceptor annotations:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   annotations:
-    evacuation.coordination.k8s.io/priority_fallback-evacuator.rescue-company.com: "2000"
-    evacuation.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
-    evacuation.coordination.k8s.io/priority_deployment.apps.k8s.io: "10001/higher-level-controller"
-    evacuation.coordination.k8s.io/priority_sensitive-workload-operator.fruit-company.com: "11000/knowledgeable-app-specific"
-    evacuation.coordination.k8s.io/priority_horizontalpodautoscaler.autoscaling.k8s.io: "12000/hpa"
+    interceptor.evictionrequest.coordination.k8s.io/priority_fallback-interceptor.rescue-company.com: "2000"
+    interceptor.evictionrequest.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
+    interceptor.evictionrequest.coordination.k8s.io/priority_deployment.apps.k8s.io: "10001/higher-level-controller"
+    interceptor.evictionrequest.coordination.k8s.io/priority_sensitive-workload-operator.fruit-company.com: "11000/knowledgeable-app-specific"
+    interceptor.evictionrequest.coordination.k8s.io/priority_horizontalpodautoscaler.autoscaling.k8s.io: "12000/hpa"
   labels:
     app: nginx
   name: sensitive-app
   namespace: blueberry
 ```
 
-The evacuator should observe the evacuation objects that match the pods that the evacuator manages
-(e.g. through a labelSelector or ownerReferences). It should start the evacuation only if it
-observes the `.status.activeEvacuatorClass` in the Evacuation object that matches the
-`EVACUATOR_CLASS` it previously set in the annotation.
+The interceptor should observe the eviction request objects that match the pods that the interceptor
+manages (e.g. through a labelSelector or ownerReferences). It should start the eviction process only
+if it observes the `.status.activeInterceptorClass` in the EvictionRequest object that matches the
+`INTERCEPTOR_CLASS` it previously set in the annotation.
 
-If the evacuator is not interested in evacuating the pod, it should set
-`.status.activeEvacuatorCompleted=true`. If the evacuator is unable to respond to the evacuation,
-the `.spec.progressDeadlineSeconds` will timeout and control of the evacuation process will
-be passed to the next evacuator with the highest priority. If there is none, the pod will get
-evicted by the evacuation controller.
+If the interceptor is not interested in intercepting/evicting the pod anymore, it should set
+`.status.activeInterceptorCompleted=true`. If the interceptor is unable to respond to the eviction
+request, the `.spec.progressDeadlineSeconds` will timeout and control of the eviction process will
+be passed to the next interceptor with the highest priority. If there is none, the pod will get
+evicted by the eviction request controller.
 
-If the evacuator is interested in evacuating the pod it should look at
+If the interceptor is interested in intercepting/evicting the pod it should look at
 `.spec.progressDeadlineSeconds` and make sure to update the status periodically in less than that
 duration. For example, if `.spec.progressDeadlineSeconds` is set to the default value of 1800 (30m),
 it may update the status every 3 minutes. The status updates should look as follows:
-- Check that `.status.activeEvacuatorClass` still matches the `EVACUATOR_CLASS` previously set in
-  the annotation and that `.status.activeEvacuatorCompleted` is still false. If one of these is not
-  correct and the evacuation is still not complete, it should abort the evacuation or output an
-  error (e.g. via an event).
-- Set `.status.evacuationProgressTimestamp` to the present time to signal that the evacuation is
-  not stuck.
-- Update the `.status.evacuationCancellationPolicy` field if needed. This field might have been set
-  by the previous evacuator. This field should be set to `Forbid` if the current evacuation process
-  of the pod cannot be stopped/cancelled. This will block any DELETE requests on the Evacuation
-  object. If the evacuator supports evacuation cancellation, it should make sure that this field is
-  set to `Allow`, and it should be aware that the Evacuation object can be deleted at any time.
-- Update `.status.expectedEvacuationFinishTime` if a reasonable estimation can be made of how long
-  the evacuation will take. This can be modified later to change the estimate.
-- Set `.status.message` to inform about the progress of the evacuation in human-readable form.
-- Optionally, `.status.conditions` can be set for additional details about the evacuation.
-- Optionally, an event can be emitted to inform about the start/progress of the evacuation. Or lack
-  thereof, if the evacuation is blocked. The evacuator should ensure that an appropriate number of
-  events is emitted. `event.involvedObject` should be set to the current Evacuation.
+- Check that `.status.activeInterceptorClass` still matches the `INTERCEPTOR_CLASS` previously set
+  in the annotation and that `.status.activeInterceptorCompleted` is still false. If one of these is
+  not correct and the eviction process is still not complete, it should abort the eviction process
+  or output an error (e.g. via an event).
+- Set `.status.progressTimestamp` to the present time to signal that the eviction request is not
+  stuck.
+- Update the `.status.evictionRequestCancellationPolicy` field if needed. This field might have been
+  set by the previous interceptor. This field should be set to `Forbid` if the current eviction
+  request process of the pod cannot be stopped/cancelled. This will block any DELETE requests on the
+  EvictionRequest object. If the interceptor supports eviction request cancellation, it should make
+  sure that this field is set to `Allow`, and it should be aware that the EvictionRequest object can
+  be deleted at any time.
+- Update `.status.expectedInterceptorFinishTime` if a reasonable estimation can be made of how long
+  the eviction process will take for the current interceptor. This can be modified later to change
+  the estimate.
+- Set `.status.message` to inform about the progress of the eviction in human-readable form.
+- Optionally, `.status.conditions` can be set for additional details about the eviction request.
+- Optionally, an event can be emitted to inform about the start/progress of the eviction. Or lack
+  thereof, if the eviction request is blocked. The interceptor should ensure that an appropriate
+  number of events is emitted. `event.involvedObject` should be set to the current EvictionRequest.
 
-The end of the evacuation is communicated by pod termination (usually by an evict or delete call)
-and reaching the terminal phase (`Succeeded` or `Failed`). It can also withdraw from the evacuation
-process by setting `.status.activeEvacuatorCompleted=true`.
+The completion of the eviction request is communicated by pod termination (usually by an evict or
+delete call) and reaching the terminal phase (`Succeeded` or `Failed`). It can also withdraw from
+the eviction process by setting `.status.activeInterceptorCompleted=true`.
 
-The evacuator should prefer the eviction API call for the pod deletion/termination to respect the
-PDBs, unless the evacuation process is incompatible with the PDBs and the application has already
-been disrupted (either by the evacuator or by external forces). Or the evacuator has a better
-insight into the application availability than the PDB. In these cases, it is possible to skip the
-eviction call and use the delete call directly.
+The interceptor should prefer the eviction API endpoint call for the pod deletion/termination to
+respect the PDBs, unless the eviction process is incompatible with the PDBs and the application has
+already been disrupted (either by the interceptor or by external forces). Or the interceptor has a
+better insight into the application availability than the PDB. In these cases, it is possible to
+skip the eviction call and use the delete call directly.
 
-Also, the evacuator should not block the evacuation by updating the
-`.status.evacuationProgressTimestamp` when no work is being done on the evacuation. This should
-be decided solely by the user deploying the application and resolved by creating a PDB. 
+Also, the interceptor should not block the eviction request by updating
+the`.status.progressTimestamp` when no work is being done on the eviction. This should be decided
+solely by the user deploying the application and resolved by creating a PDB.
 
-### Evacuation controller
+### Eviction Request Controller
 
-[Evacuation controller](#evacuation-controller) section provides a general overview.
+[Eviction Request Controller](#eviction-request-controller) section provides a general overview.
 
 
-#### Evacuator Class Selection
+#### Interceptor Class Selection
 
-The evacuator classes and their priorities are parsed from the pod annotations into the
-`.spec.evacuators` on [Evacuation Admission](#evacuation-admission).
+The interceptor classes and their priorities are parsed from the pod annotations into the
+`.spec.interceptors` on [EvictionRequest Validation and Admission](#evictionrequest-validation-and-admission).
 
-The evacuation controller reconciles Evacuations and picks the highest priority evacuator from
-`.spec.evacuators` and sets its `evacuatorClass` to the `.status.activeEvacuatorClass`.
-If `.status.activeEvacuatorCompleted` is true and the pod exists or `.spec.progressDeadlineSeconds`
-has elapsed since `.status.evacuationProgressTimestamp`, then the evacuation controller sets
-`status.activeEvacuatorClass` to the next highest priority evacuator from `.spec.evacuators`.
-During the switch to the new evacuator, the evacuation controller will also
-- Set `.status.activeEvacuatorCompleted` field to false.
-- Update`.status.evacuationProgressTimestamp` to the present time.
-- Set `.status.expectedEvacuationFinishTime` to nil.
-- Set `.status.message` to indicate that the evacuators have been switched.
+The eviction request controller reconciles EvictionRequests and picks the highest priority
+interceptor from `.spec.interceptors` and sets its `interceptorClass` to the
+`.status.activeInterceptorClass`. If `.status.activeInterceptorCompleted` is true and the pod exists
+or `.spec.progressDeadlineSeconds` has elapsed since `.status.progressTimestamp`, then the eviction
+request controller sets `status.activeInterceptorClass` to the next highest priority interceptor
+from `.spec.interceptors`. During the switch to the new interceptor, the eviction request controller
+will also
+- Set `.status.activeInterceptorCompleted` field to false.
+- Update`.status.progressTimestamp` to the present time.
+- Set `.status.expectedInterceptorFinishTime` to nil.
+- Set `.status.message` to indicate that the interceptors have been switched.
 
 #### Eviction
 
-The evacuation controller will observe pod evacuations and evict pods that cannot be evacuated by
-calling the eviction API.
+The eviction request controller will observe EvictionRequests and evict pods that are unable to be
+terminated by calling the eviction API endpoint.
 
-Pods that cannot be evacuated are:
-- Evacuation's `.status.activeEvacuatorClass` field is empty.
-- Evacuation's `.status.activeEvacuatorCompleted` field is true and there is no other evacuator to
-  select.
-- Evacuation's `.spec.progressDeadlineSeconds` has elapsed since
-  `.status.evacuationProgressTimestamp` or from `.metadata.creationTimestamp` if
-  `.status.evacuationProgressTimestamp` is nil.
+Pods that are unable to be terminated:
+- EvictionRequest's `.status.activeInterceptorClass` field is empty.
+- EvictionRequest's `.status.activeInterceptorCompleted` field is true and there is no other
+  interceptor to select.
+- EvictionRequest's `.spec.progressDeadlineSeconds` has elapsed since
+  `.status.progressTimestamp` or from `.metadata.creationTimestamp` if
+  `.status.progressTimestamp` is nil.
 
-Eviction of DaemonSet pods and mirror pods is not supported. However, the Evacuation can still be
-used to evacuate them by other means. Terminating pods will not attempt eviction either.
+API-initiated eviction of DaemonSet pods and mirror pods is not supported. However, the
+EvictionRequest can still be used to terminate them by other means.
+
+No attempt will be made to evict pods that are currently terminating.
 
 If the pod eviction fails, e.g. due to a blocking PodDisruptionBudget, the
-`.status.failedEvictionCounter` is incremented and the pod is added back to the queue with
+`.status.failedAPIEvictionCounter` is incremented and the pod is added back to the queue with
 exponential backoff (maximum approx. 15 minutes). If there is a positive progress update in the
-`.status.evacuationProgressTimestamp` of the Evacuation, it will cancel the eviction.
+`.status.progressTimestamp` of the EvictionRequest, it will cancel the eviction.
 
 #### Garbage Collection
 
-See [Evacuation Instigator Finalizer](#evacuation-instigator-finalizer) for how to distinguish
-between instigator and other finalizers.
+See [Eviction Requester Finalizer](#eviction-requester-finalizer) for how to distinguish
+between requester and other finalizers.
 
-The controller deletes the evacuation object if any of the following points is true:
-1. There are no instigator finalizers (instigators have canceled their intent to evacuate the pod)
-   and `.status.evacuationCancellationPolicy` is set to `Allow`.
+The controller deletes the EvictionRequest object if any of the following points is true:
+1. There are no requester finalizers (requesters have canceled their intent to evict the pod)
+   and `.status.evictionRequestCancellationPolicy` is set to `Allow`.
 2. The referenced pod has reached the terminal phase (`Succeeded` or `Failed`), signalling a
-   successful evacuation.
+   successful eviction.
 3. The referenced pod no longer exists (has been deleted from etcd), signalling a successful
-   evacuation.
+   eviction.
 
-For convenience, we will also remove instigator finalizers with `evacuation.coordination.k8s.io/`
-prefix when the evacuation task is complete (points 2 and 3). Other finalizers will still block
-deletion.
+For convenience, we will also remove requester finalizers with
+`evictionrequest.coordination.k8s.io/` prefix when the eviction request task is complete (points 2
+and 3). Other finalizers will still block deletion.
 
-### Evacuation API
+### EvictionRequest API
 
 ```golang
 
-// Evacuation defines an evacuation
-type Evacuation struct {
+// EvictionRequest defines an eviction request
+type EvictionRequest struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// Object's metadata.
 	// .metadata.generateName is not supported.
-	// .metadata.name should match the .metadata.uid of the pod being evacuated. 
-	// The labels of the evacuation object will be merged with pod's .metadata.labels. The labels
-	// of the pod have a preference.
+	// .metadata.name should match the .metadata.uid of the pod being evicted.
+	// The labels of the eviction request object will be merged with pod's .metadata.labels. The
+	// labels of the pod have a preference.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
-	// Spec defines the evacuation.
+	// Spec defines the eviction request specification.
 	// https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 	// +optional
-	Spec EvacuationSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Spec EvictionRequestSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
 
-	// Status represents the most recently observed status of the evacuation.
-	// Populated by the current evacuator.
+	// Status represents the most recently observed status of the eviction request.
+	// Populated by the current interceptor and eviction request controller.
 	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
 	// +optional
-	Status EvacuationStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
+	Status EvictionRequestStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
 }
 
-// EvacuationSpec is a specification of an Evacuation.
-type EvacuationSpec struct {
-	// PodRef references a pod that is subject to evacuation.
+// EvictionRequestSpec is a specification of an EvictionRequest.
+type EvictionRequestSpec struct {
+	// PodRef references a pod that is subject to eviction/termination.
 	// This field is required and immutable.
 	// +optional
 	PodRef *LocalPodReference `json:"podRef,omitempty" protobuf:"bytes,1,opt,name=podRef"`
 
-	// Evacuators reference evacuators that respond to this evacuation.
-	// This field does not need to be set and is resolved when the Evacuation object is created
+	// Interceptors reference interceptors that respond to this eviction request.
+	// This field does not need to be set and is resolved when the EvictionRequest object is created
 	// on admission.
-	// If no evacuators are specified, the pod in PodRef is evicted using the Eviction API.
-	// The maximum length of the evacuators list is 100.
+	// If no interceptors are specified, the pod in PodRef is evicted using the Eviction API.
+	// The maximum length of the interceptors list is 100.
 	// This field is immutable.
 	// +optional
-	// +patchMergeKey=evacuatorClass
+	// +patchMergeKey=interceptorClass
 	// +patchStrategy=merge
 	// +listType=map
-	// +listMapKey=evacuatorClass
-	Evacuators []Evacuator `json:"evacuators,omitempty"  patchStrategy:"merge" patchMergeKey:"evacuatorClass" protobuf:"bytes,2,rep,name=evacuators"`
+	// +listMapKey=interceptorClass
+	Interceptors []Interceptor `json:"interceptors,omitempty"  patchStrategy:"merge" patchMergeKey:"interceptorClass" protobuf:"bytes,2,rep,name=interceptors"`
 
-	// ProgressDeadlineSeconds is a maximum amount of time an evacuator should take to report on an
-	// evacuation progress by updating the .status.evacuationProgressTimestamp.
-	// If the .status.evacuationProgressTimestamp is not updated within the duration of
-	// ProgressDeadlineSeconds, the evacuation is passed over to the next evacuator with the
+	// ProgressDeadlineSeconds is a maximum amount of time an interceptor should take to report on
+	// an eviction progress by updating the .status.progressTimestamp.
+	// If the .status.progressTimestamp is not updated within the duration of
+	// ProgressDeadlineSeconds, the eviction request is passed over to the next interceptor with the
 	// highest priority. If there is none, the pod is evicted using the Eviction API.
 	//
 	// The minimum value is 600 (10m) and the maximum value is 21600 (6h).
 	// The default value is 1800 (30m).
 	// This field is required and immutable.
-	ProgressDeadlineSeconds int32 `json:"progressDeadlineSeconds" protobuf:"varint,3,opt,name=progressDeadlineSeconds"`
+	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds" protobuf:"varint,3,opt,name=progressDeadlineSeconds"`
 }
 
 // LocalPodReference contains enough information to locate the referenced pod inside the same namespace.
@@ -728,95 +766,99 @@ type LocalPodReference struct {
 	UID string `json:"uid" protobuf:"bytes,2,opt,name=uid"`
 }
 
-// Evacuator information that allows you to identify the evacuator responding to this evacuation.
-// Pods can be annotated with
-// evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}: ${PRIORITY}/${ROLE}
-// evacuation.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
-// annotations that can be parsed into the Evacuator struct when the Evacuation object is created
-// on admission.
-type Evacuator struct {
-	// EvacuatorClass must be RFC-1123 DNS subdomain identifying the evacuator (e.g. foo.example.com).
+// Interceptor information that allows you to identify the interceptor responding to this eviction
+// request. Pods can be annotated with:
+// interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS}: ${PRIORITY}/${ROLE}
+// interceptor.evictionrequest.coordination.k8s.io/priority_replicaset.apps.k8s.io: "10000/controller"
+// annotations that can be parsed into the Interceptor struct when the EvictionRequest object is
+// created on admission.
+type Interceptor struct {
+	// InterceptorClass must be RFC-1123 DNS subdomain identifying the interceptor (e.g.
+	// foo.example.com).
 	// +required
-	EvacuatorClass string `json:"evacuatorClass" protobuf:"bytes,1,opt,name=evacuatorClass"`
+	InterceptorClass string `json:"interceptorClass" protobuf:"bytes,1,opt,name=interceptorClass"`
 
-	// Priority for this EvacuatorClass. Higher priorities are selected first by the evacuation
-	// controller. The evacuator that is the managing controller should set the value of this field
-	// to 10000 to allow both for preemption or evacuator fallback registration by other evacuators.
+	// Priority for this InterceptorClass. Higher priorities are selected first by the eviction
+	// request controller. The interceptor that is the managing controller should set the value of
+	// this field to 10000 to allow both for preemption or fallback registration by other
+	// interceptors.
 	//
-	// Priorities 9900-10100 are reserved for evacuators with a class that has the same parent
-	// domain as the controller evacuator. Duplicate priorities are not allowed in this interval.
+	// Priorities 9900-10100 are reserved for interceptors with a class that has the same parent
+	// domain as the controller interceptor. Duplicate priorities are not allowed in this interval.
 	//
-	// The number of evacuator annotations is limited to 30 in the 9900-10100 interval and to 70
+	// The number of interceptor annotations is limited to 30 in the 9900-10100 interval and to 70
 	// outside of this interval.
 	// The minimum value is 0 and the maximum value is 100000.
 	// +required
 	Priority int32 `json:"priority" protobuf:"varint,2,opt,name=priority"`
 
-	// Role of the evacuator. The "controller" value is reserved for the managing controller of the
-	// pod. The role can send additional signal to other evacuators if they should preempt this
-	// evacuator or not.
+	// Role of the interceptor. The "controller" value is reserved for the managing controller of
+	// the pod. The role can send additional signal to other interceptors if they should preempt
+	// this interceptor or not.
 	// +optional
 	Role *string `json:"role,omitempty" protobuf:"bytes,3,opt,name=role"`
 }
 
-// EvacuationStatus represents the last observed status of the evacuation.
-type EvacuationStatus struct {
-	// Evacuators of the ActiveEvacuatorClass can adopt this evacuation by updating the
-	// EvacuationProgressTimestamp or orphan/complete it by setting ActiveEvacuatorCompleted to true.
+// EvictionRequestStatus represents the last observed status of the eviction request.
+type EvictionRequestStatus struct {
+	// Interceptors of the ActiveInterceptorClass can adopt this eviction request by updating the
+	// ProgressTimestamp or orphan/complete it by setting ActiveInterceptorCompleted to true.
 	// +optional
-	ActiveEvacuatorClass *string `json:"activeEvacuatorClass,omitempty" protobuf:"bytes,1,opt,name=activeEvacuatorClass"`
+	ActiveInterceptorClass *string `json:"activeInterceptorClass,omitempty" protobuf:"bytes,1,opt,name=activeInterceptorClass"`
 
-	// ActiveEvacuatorCompleted should be set to true when the evacuator of the
-	// ActiveEvacuatorClass has completed its full or partial evacuation.
-	// This field can also be set to true if no evacuator is available.
-	// If this field is true, there is no additional evacuator available, and the evacuated pod is
+	// ActiveInterceptorCompleted should be set to true when the interceptor of the
+	// ActiveInterceptorClass has fully or partially completed (may result in pod termination).
+	// This field can also be set to true if no interceptor is available.
+	// If this field is true, there is no additional interceptor available, and the evicted pod is
 	// still running, it will be evicted using the Eviction API.
 	// +optional
-	ActiveEvacuatorCompleted bool `json:"activeEvacuatorCompleted,omitempty" protobuf:"varint,2,opt,name=activeEvacuatorCompleted"`
+	ActiveInterceptorCompleted bool `json:"activeInterceptorCompleted,omitempty" protobuf:"varint,2,opt,name=activeInterceptorCompleted"`
 
-	// EvacuationProgressTimestamp is the time at which the evacuation was reported to be in
-	// progress by the evacuator.
-	// Cannot be set to the future time (after taking time skew into account).
-	// +optional
-	EvacuationProgressTimestamp *metav1.Time `json:"evacuationProgressTimestamp,omitempty" protobuf:"bytes,3,opt,name=evacuationProgressTimestamp"`
-
-	// ExpectedEvacuationFinishTime is the time at which the evacuation is expected to end for the
-	// current evacuator and its class.
+	// ExpectedInterceptorFinishTime is the time at which the eviction process step is expected to
+	// end for the current interceptor and its class.
 	// May be empty if no estimate can be made.
 	// +optional
-	ExpectedEvacuationFinishTime *metav1.Time `json:"expectedEvacuationFinishTime,omitempty" protobuf:"bytes,4,opt,name=expectedEvacuationFinishTime"`
+	ExpectedInterceptorFinishTime *metav1.Time `json:"expectedInterceptorFinishTime,omitempty" protobuf:"bytes,3,opt,name=expectedInterceptorFinishTime"`
 
-	// EvacuationCancellationPolicy should be set to Forbid by the evacuator if it is not possible
-	// to cancel (delete) the evacuation.
-	// When this value is Forbid, DELETE requests of this Evacuation object will not be accepted
+	// ProgressTimestamp is the time at which the eviction process was reported to be in progress by
+	// the interceptor.
+	// Cannot be set to the future time (after taking time skew into account).
+	// +optional
+	ProgressTimestamp *metav1.Time `json:"progressTimestamp,omitempty" protobuf:"bytes,4,opt,name=progressTimestamp"`
+
+	// EvictionRequestCancellationPolicy should be set to Forbid by the interceptor if it is not possible
+	// to cancel (delete) the eviction request.
+	// When this value is Forbid, DELETE requests of this EvictionRequest object will not be accepted
 	// while the pod exists.
-	// This field is not reset by the evacuation controller when selecting an evacuator.
-	// Changes to this field should always be reconciled by the active evacuator.
+	// This field is not reset by the eviction request controller when selecting an interceptor.
+	// Changes to this field should always be reconciled by the active interceptor.
 	//
 	// Valid policies are Allow and Forbid.
 	// The default value is Allow.
 	//
-	// Allow policy allows cancellation of this evacuation.
-	// The Evacuation can be deleted before the Pod is fully terminated.
+	// Allow policy allows cancellation of this eviction request.
+	// The EvictionRequest can be deleted before the Pod is fully terminated.
 	//
-	// Forbid policy forbids cancellation of this evacuation.
-	// The Evacuation can't be deleted until the Pod is fully terminated.
+	// Forbid policy forbids cancellation of this eviction request.
+	// The EvictionRequest can't be deleted until the Pod is fully terminated.
 	//
 	// This field is required.
-	EvacuationCancellationPolicy EvacuationCancellationPolicy `json:"evacuationCancellationPolicy" protobuf:"varint,5,opt,name=evacuationCancellationPolicy"`
+	EvictionRequestCancellationPolicy EvictionRequestCancellationPolicy `json:"evictionRequestCancellationPolicy" protobuf:"varint,5,opt,name=evictionRequestCancellationPolicy"`
 
-	// The number of unsuccessful attempts to evict the referenced pod, e.g. due to a PodDisruptionBudget.
+	// The number of unsuccessful attempts to evict the referenced pod via the API-initiated eviction,
+	// e.g. due to a PodDisruptionBudget.
 	// This field is required.
-	FailedEvictionCounter int32 `json:"failedEvictionCounter" protobuf:"varint,6,opt,name=failedEvictionCounter"`
+	FailedAPIEvictionCounter int32 `json:"failedAPIEvictionCounter" protobuf:"varint,6,opt,name=failedAPIEvictionCounter"`
 
-	// Message is a human readable message indicating details about the evacuation.
+	// Message is a human readable message indicating details about the eviction request.
 	// This may be an empty string.
 	// +required
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=32768
 	Message string `json:"message" protobuf:"bytes,7,opt,name=message"`
 
-	// Conditions can be used by evacuators to share additional information about the evacuation.
+	// Conditions can be used by interceptors to share additional information about the eviction
+	// request.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -826,292 +868,350 @@ type EvacuationStatus struct {
 }
 
 // +enum
-type EvacuationCancellationPolicy string
+type EvictionRequestCancellationPolicy string
 
 const (
-// Allow policy allows cancellation of this evacuation.
-// The Evacuation can be deleted before the Pod is fully terminated.
-Allow EvacuationCancellationPolicy = "Allow"
-// Forbid policy forbids cancellation of this evacuation.
-// The Evacuation can't be deleted until the Pod is fully terminated.
-Forbid EvacuationCancellationPolicy = "Forbid"
+// Allow policy allows cancellation of this eviction request.
+// The EvictionRequest can be deleted before the Pod is fully terminated.
+Allow EvictionRequestCancellationPolicy = "Allow"
+// Forbid policy forbids cancellation of this eviction request.
+// The EvictionRequest can't be deleted until the Pod is fully terminated.
+Forbid EvictionRequestCancellationPolicy = "Forbid"
 )
 
 ```
 
-#### Evacuation Validation and Admission
+#### EvictionRequest Validation and Admission
 
 Special admission rules should be implemented as an admission plugin. An alternative would be to
 use ValidatingAdmissionPolicy, but this is not possible because we need to list the pods during the
-CREATE and DELETE requests and list Evacuations (.spec) during DELETE requests.
+CREATE and DELETE requests and list EvictionRequests (.spec) during DELETE requests.
 
 ##### CREATE
 
-Name of the Evacuation object must be unique and predictable for each pod to prevent the creation
-of multiple Evacuations for the same pod. We do not expect the evacuators to support interaction
-with multiple Evacuations for a pod.
+Name of the EvictionRequest object must be unique and predictable for each pod to prevent the creation
+of multiple EvictionRequests for the same pod. We do not expect the interceptors to support interaction
+with multiple EvictionRequests for a pod.
 
 `.metadata.generateName` is not supported. If it is set, the request will be rejected.
 
 `.metadata.name` must be identical to `.spec.podRef.uid` or the request will be rejected.
 The Pod matching the `.spec.podRef.name` will be obtained from the admission plugin lister. If the
 `.spec.podRef.uid` does not match with the pod's UID, the request will be rejected. For more
-details, see [The Name of the Evacuation Objects](#the-name-of-the-evacuation-objects) section in
+details, see [The Name of the EvictionRequest Objects](#the-name-of-the-evictionrequest-objects) section in
 the Alternatives.
 
-`.spec.evacuators` are set according to the pod's annotations (see [Evacuator](#evacuator) and
-[Evacuation API](#evacuation-api)).
+`.spec.interceptors` are set according to the pod's annotations (see [Interceptor](#interceptor) and
+[EvictionRequest API](#evictionrequest-api)).
 
-The pod labels are merged with the Evacuation labels (pod labels have a preference) to allow
-for custom label selectors when observing the evacuations.
+The pod labels are merged with the EvictionRequest labels (pod labels have a preference) to allow
+for custom label selectors when observing the eviction requests.
 
-`.status.activeEvacuatorClass` should be empty on creation as its selection should be left on the
-evacuation controller.
+`.status.activeInterceptorClass` should be empty on creation as its selection should be left on the
+eviction request controller.
 
-`.status.evacuationCancellationPolicy` should be `Allow` on creation, as its resolution should be
-left to the evacuation controller.
+`.status.evictionRequestCancellationPolicy` should be `Allow` on creation, as its resolution should be
+left to the eviction request controller.
 
-`.status.FailedEvictionCounter` can be only incremented.
+`.status.failedAPIEvictionCounter` can be only incremented.
 
 ##### DELETE
 
-Delete requests are forbidden for Evacuation objects that have the
-`.status.evacuationCancellationPolicy` field set to `Forbid` and the pod still exists.
+Delete requests are forbidden for EvictionRequest objects that have the
+`.status.evictionRequestCancellationPolicy` field set to `Forbid` and the pod still exists.
 
 ##### CREATE, UPDATE, DELETE
 
-Principal making the request should be authorized for deleting pods that match the Evacuation's
-`.spec.podRef`. 
+Principal making the request should be authorized for deleting pods that match the EvictionRequest's
+`.spec.podRef`.
 
 #### Pod Admission
 
-`evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}: ${PRIORITY}/${ROLE}` annotations
-should be checked on pod admission:
+`interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS}: ${PRIORITY}/${ROLE}`
+annotations should be checked on pod admission:
 - `PRIORITY` should be an integer with a min value `0` and a max value `100000`.
 - `ROLE` is optional.
 - Only one annotation of this format can have a `ROLE=controller`.
 - The `controller` role should have a priority of `10000`. Other role or empty role cannot have a
   value of `10000`.
 - Priorities in the `9900-10100` interval should be reserved for the sibling and descendant
-  domains of the controller role. This means that `EVACUATOR_CLASS=replicaset.apps.k8s.io` with a
+  domains of the controller role. This means that `INTERCEPTOR_CLASS=replicaset.apps.k8s.io` with a
   `ROLE=controller` has a parent domain `apps.k8s.io` and any domain with that parent is allowed in
   this interval. For example `deployment.apps.k8s.io` or `customfeature.replicaset.apps.k8s.io`.
   This can be used by a controller that has its logic split between multiple components
   (e.g. ReplicaSet + Deployment), and it ensures that 3rd party controllers cannot inject their
   behavior in between a single vendor's predefined steps. And if there is a need to inject behavior,
-  the priority should be increased above `10100` or below `9900` for such an evacuator class. If
+  the priority should be increased above `10100` or below `9900` for such an interceptor class. If
   `ROLE=controller` is not set, the range `9900-10100` cannot be used.
 - The number of these annotations is limited to 100. 30 slots are always reserved for the
-  `ROLE=controller` and other evacuators with the same parent domain (interval `9900-10100`). 70
-  slots are reserved for the rest of the general evacuators outside this interval. If there is a
-  need for a larger number of evacuators, the current use case should be re-evaluated. Limiting the
-  number of evacuators ensures that the eviction cannot be blocked indefinitely by setting
-  an abnormally large number of these annotations on a pod.
-- To prevent misuse, we will maintain a list of allowed `*.k8s.io` evacuator classes. And reject
+  `ROLE=controller` and other interceptors with the same parent domain (interval `9900-10100`). 70
+  slots are reserved for the rest of the general interceptors outside this interval. If there is a
+  need for a larger number of interceptors, the current use case should be re-evaluated. Limiting
+  the number of interceptors ensures that the EvictionRequest cannot be blocked indefinitely by
+  setting an abnormally large number of these annotations on a pod.
+- To prevent misuse, we will maintain a list of allowed `*.k8s.io` interceptor classes. And reject
   any classes outside the main Kubernetes project on admission.
 - Annotations with duplicate priorities are not allowed in the `9900-10100` interval, but are
   allowed outside of this interval.
 
-#### Immutability of Evacuation Spec Fields
+#### Immutability of EvictionRequest Spec Fields
 
-`.spec.podRef` does not make sense to make mutable, the Evacuation is always scoped to a specific
-instance of a pod. If the pod is immediately recreated with the same name, but a different UID, a
-new Evacuation object should be created
+`.spec.podRef` does not make sense to make mutable, the EvictionRequest is always scoped to a
+specific instance of a pod. If the pod is immediately recreated with the same name, but a different
+UID, a new EvictionRequest object should be created
 
-`.spec.evacuators` is set only by the Evacuation Instigator and during the Evacuation object create
-admission. We do not allow subsequent changes to this field to ensure predictability of the
-evacuation process. Also, late registration of the evacuator could go unnoticed and be preempted by
-the evacuation controller, resulting in eviction of the pod.
+`.spec.interceptors` is only set by the Eviction Requester and during the EvictionRequest object
+create admission. We do not allow subsequent changes to this field to ensure the predictability of
+the eviction request process. Also, late registration of the interceptor could go unnoticed and be
+preempted by the eviction request controller, resulting in the premature eviction of the pod.
 
 `.spec.progressDeadlineSeconds` could be made mutable, but we choose not to do that to make the
-integration easier on the evacuator side. That is, if the evacuator observes the deadline it can
-rely on it in its evacuation process. It would be much harder to ensure correct update behavior if
-the deadline is mutable.
+integration easier on the interceptor side. That is, if the interceptor observes the deadline it can
+rely on it in its eviction process. It would be much harder to ensure correct update behavior if the
+deadline is mutable.
 
-The disadvantage of the immutability is that once the Evacuation is created, the evacuator
-instigator cannot change its decision. The deadline cannot be changed even when the Evacuation
-changes its instigator, e.g. from node maintenance controller to descheduler. We must either use
-similar deadline values in all instigator components, or be okay with different deadlines set by
-other components in the same Evacuation instance.
+The disadvantage of the immutability is that once the EvictionRequest is created, the eviction
+requester cannot change its decision. The deadline cannot be changed even when the EvictionRequest
+changes its requester, e.g. from node maintenance controller to descheduler. We must either use
+similar deadline values in all requester components, or be okay with different deadlines set by
+other components in the same EvictionRequest instance.
 
 It would be also possible, not to have these fields at all and just declare a global deadline that
 the clients have to meet. But it would be hard to ever change these values in the future. Compared
-to updating a smaller number of Evacuation instigators, when a better deadline value is agreed upon.
+to updating a smaller number of eviction requesters, when a better deadline value is agreed upon.
 The validation also ensures that the interval of values that can be set is reasonable.
 
-### Evacuation Process
+### EvictionRequest Process
 
-The following diagrams describe what the evacuation process will look like for each actor:
+The following diagrams describe what the EvictionRequest process will look like for each actor:
 
-![evacuation-process](evacuation.svg)
+![eviction request-process](eviction request.svg)
 
 
 ### Follow-up Design Details for Kubernetes Workloads
 
-Kubernetes Workloads should be made aware of the Evacuation API to properly support the evacuation
-process.
+Kubernetes Workloads should be made aware of the EvictionRequest API to properly support the
+eviction request process.
 
-- ReplicaSet and ReplicationController partial support is considered. The full evacuation logic
-  should be implemented by a higher level workload such as Deployments. ReplicaSets are intended to
-  be a simple primitive without any sophisticated scaling logic.
+- ReplicaSet and ReplicationController partial support is considered. The full eviction logic should
+  be implemented by a higher level workload such as Deployments. ReplicaSets are intended to be a
+  simple primitive without any sophisticated scaling logic.
 - Deployment support is considered.
 - StatefulSet support is considered.
-- DaemonSet support is considered, but will be explored as a part of the 
+- DaemonSet support is considered, but will be explored as a part of the
   [Declarative Node Maintenance KEP](https://github.com/kubernetes/enhancements/pull/4213), as its
-  pods should not be disrupted/evacuated during normal operation.
+  pods should not be disrupted/evicted during normal operation.
 - Jobs/CronJobs are not yet considered, because jobs should not normally run critical workloads
-  that require evacuation and should therefore leave the node quickly and not block its drain.
-  If required, custom Evacuators can be implemented to support custom evacuation for specialized
-  types of jobs.
+  that require eviction request and should therefore leave the node quickly and not block its drain.
+  If required, custom interceptors can be implemented to support custom eviction logic for
+  specialized types of jobs.
 
 #### ReplicaSet Controller
 
-Active response to Evacuation objects cannot be implemented without first analyzing a pod's owner
-and its capabilities. For example, not all deployment strategy configurations can simply be
-evacuated. This is also true for other owners. Therefore, it does not make sense to impose such a
-responsibility on the replication controller (e.g., by introducing new fields). Instead,
-deployments and other controllers should advertise the evacuation capabilities on ReplicaSet pods
-and implement/perform the evacuation.
+Active response to EvictionRequest objects cannot be implemented without first analysing the owner
+of a pod and its capabilities. For example, not all deployment strategy configurations can simply
+utilize EvictionRequests without a loss of availability. This is also true for other owners.
+Therefore, it does not make sense to impose such a responsibility on the replication controller
+(e.g., by introducing new fields). Instead, deployments and other controllers should advertise the
+interceptor capabilities on ReplicaSet pods via the interceptor annotation and implement/perform the
+eviction logic.
 
-To facilitate the evacuation of high-level workloads and to take advantage of the Evacuation
-feature passively, the replicaset controller can prefer the deletion of pods with corresponding
-Evacuation objects during a ReplicaSet scale down.
+To facilitate the eviction request of high-level workloads and to take advantage of the
+EvictionRequest feature passively, the replicaset controller can prefer the deletion of pods with
+corresponding EvictionRequest objects during a ReplicaSet scale down.
+
+To correctly orchestrate these steps, replica set controller should set an interceptor
+annotation on its pods:
+`interceptor.evictionrequest.coordination.k8s.io/priority_deployment.apps.k8s.io: "10000/controller"`.
+And not delete these pods until it becomes the active interceptor.
 
 #### Deployment Controller
 
-The deployment controller must first decide whether a particular Deployment supports the evacuation
-according to the deployment strategy.
-- `Recreate` strategy deletes all the pods at once during rollouts, and supporting the evacuation
-  provides no benefit over eviction.
-- `Rolling` update strategy with `MaxSurge` should always support evacuation.
-- `Rolling` update strategy with `MaxUnavailable` evacuation support can have certain advantages
-  and disadvantages. It can reduce the pod disruption when the number of evacuated pods is greater
-  than the `MaxUnavailable` field. Unfortunately, in some cases the pods may be covered by PDBs and
-  the pod disruptions may exceed the expected number. Therefore, we would need to introduce a new
-  field (e.g. `.spec.evacuationStrategy`) that would provide the ability to opt into this behavior.
+The deployment controller must first decide whether a particular Deployment supports eviction
+requests according to the deployment strategy.
+- `Recreate` strategy deletes all the pods at once during rollouts, and supporting the eviction
+  request provides no benefit over simple eviction.
+- `Rolling` update strategy with `MaxSurge` should always support eviction requests.
+- `Rolling` update strategy with `MaxUnavailable` eviction request support can have certain
+  advantages and disadvantages. It can reduce the pod disruption when the number of evicted pods is
+  greater than the `MaxUnavailable` field. Unfortunately, in some cases the pods may be covered by
+  PDBs and the pod disruptions may exceed the expected number. Therefore, we would need to introduce
+  a new field (e.g. `.spec.evictionRequestStrategy`) that would provide the ability to opt into this
+  behavior.
 
-If the controller evaluates that there is a support for the Evacuation it should make sure that its 
-pods are annotated with
-`evacuation.coordination.k8s.io/priority_deployment.apps.k8s.io: "10000/controller"`.
+If the controller evaluates that there is a support for the EvictionRequest it should make sure that
+its pods are annotated with
+`interceptor.evictionrequest.coordination.k8s.io/priority_deployment.apps.k8s.io: "10001/deployment-controller"`.
+We can assume that these pods are also annotated with a replica set interceptor set to
+`"10000/controller"`
 
-The controller should observe the Evacuation objects that correspond to the pods that the
-controller manages. It should start the evacuation when it observes that the
-`.status.activeEvacuatorClass` field of the Evacuation is equal to `deployment.apps.k8s.io`.
+The controller should observe the EvictionRequest objects that correspond to the pods that the
+controller manages. It should start the eviction logic when it observes that the
+`.status.activeInterceptorClass` field of the EvictionRequest is equal to `deployment.apps.k8s.io`.
 
-It should check to see that the Deployment object still supports evacuation, and if not, it should
-set `.status.activeEvacuatorCompleted=true`.
+It should check to see that the Deployment object still supports eviction request, and if not, it
+should set `.status.activeInterceptorCompleted=true`.
 
-The evacuation should then proceed by periodically updating all assigned Evacuation object with
-progress, as described in the [Evacuator](#evacuator) section.
+The implementation should then proceed by periodically updating all assigned EvictionRequest object
+with progress, as described in the [Interceptor](#interceptor) section.
 
-It should also block Evacuation object deletion by setting an
-`evacuation.coordination.k8s.io/instigator_deployment.apps.k8s.io` finalizer to properly support
-Evacuation cancellation.
-
-The evacuation is strategy specific. 
+The eviction logic is strategy specific.
 
 If the Deployment has a `.spec.strategy.rollingUpdate.maxSurge` value, the controller will create
 surge pods by scaling up the ReplicaSet(s). If the node is under the maintenance, the new pods will
-not be scheduled on that node because the `.spec.unschedulable` node field would be set to true.
-As soon as the surge pods become available, the deployment controller will scale down the
+not be scheduled on that node because the `.spec.unschedulable` node field would be set to true. As
+soon as the surge pods become available, the deployment controller will scale down the
 ReplicaSet(s). The replica set controller will then in turn delete the pods with matching
-Evacuation objects.
+EvictionRequest objects.
 
-If the evacuation ends and is prematurely deleted before the surge process has a chance to complete,
-the deployment controller will scale down the ReplicaSet which will then remove the extra pods that
-were created during the surge. Once the scale down is complete, the deployment controller will
-remove its finalizer from the canceled Evacuations.
+If the eviction request ends and is prematurely deleted before the surge process has a chance to
+complete, the deployment controller will scale down the ReplicaSet which will then remove the extra
+pods that were created during the surge.
 
-Regardless of the Deployment strategy, if the Deployment is scaled down during an evacuation, the
-ReplicaSet is scaled down and the pods with matching Evacuations can be terminated immediately by
-the replicaset controller.
+Regardless of the Deployment strategy, if the Deployment is scaled down during an eviction request,
+the ReplicaSet is scaled down and the pods with matching EvictionRequests can be terminated
+immediately by the replicaset controller.
 
-For observability, we could add the `.status.ReplicasToEvacuate` field to Deployments to signal how
-many replicas are in a need of evacuation. If this field has a positive value, it could also
-indicate that an evacuator other than the deployment controller has taken the responsibility for
-the evacuation and there is no work for the deployment controller to do. It could also mean that
-pods are being evicted by the evacuation controller if the deployment controller has not responded.
-We could also add a new condition called `EvacuationInProgress` that would become `True` if there
-is at least one pod that is being evacuated by the deployment controller or by another evacuator.
-If there is no evacuator and the pods are being evicted, the value of the condition should be
-`False`.
+For observability, we could add the `.status.ReplicasToEvict` field to Deployments to signal how
+many replicas are in a need of eviction. If this field has a positive value, it could also indicate
+that an interceptor other than the deployment controller has taken the responsibility for the
+eviction request and there is no work for the deployment controller to do. It could also mean that
+pods are being evicted by the eviction request controller if the deployment controller has not
+responded. We could also add a new condition called `EvictionRequestInProgress` that would become
+`True` if there is at least one pod that is being evicted by the deployment controller or by another
+interceptor. If there is no interceptor and the pods are being evicted, the value of the condition
+should be `False`.
+
+##### Deployment Pod Surge Example
+
+We can use a Deployment with positive `.spec.strategy.rollingUpdate.maxSurge` field to prevent any
+disruption for the underlying application. By scaling up first before terminating the pods.
+
+1. A set of pods A of an application P are created with a Deployment controller interceptor
+   annotation (priority 10001) and a ReplicaSet controller interceptor annotation (priority 10000).
+   Application P is a PostgresSQL instance that can have 1-n pods and requires no loss of
+   availability.
+2. A node drain controller starts draining a node Z and makes it unschedulable.
+3. The node drain controller creates an EvictionRequests for a subset B of pods A to evict them from
+   a node.
+4. The eviction request controller designates the deployment controller as the interceptor based on
+   the highest priority. No action (termination) is taken on the pods yet.
+5. The deployment controller creates a set of surge pods C to compensate for the future loss of
+   availability of pods B. The new pods are created by temporarily surging the `.spec.replicas`
+   count of the underlying replica sets up to the value of deployments `maxSurge`.
+6. Pods C are scheduled on a new schedulable node that is not under the node drain.
+7. Pods C become available.
+8. The deployment controller scales down the surging replica sets back to their original value.
+9. The deployment controller sets `ActiveInterceptorCompleted=true` on the eviction requests of
+   pods B that are ready to be deleted.
+10. The eviction request controller designates the replica set controller as the next interceptor.
+11. The replica set controller deletes the pods to which an EvictionRequest object has been
+    assigned, preserving the availability of the application.
 
 #### StatefulSet Controller
 
-The statefulset controller must first decide whether a particular StatefulSet supports the
-evacuation according to the stateful set update strategy.
+The statefulset controller must first decide whether a particular StatefulSet supports the eviction
+request according to the stateful set update strategy.
 - `OnDelete` strategy is a legacy behavior that does not delete pods and waits for a manual
-  deletion. We cannot provide an evacuation strategy for these.
-- `RollingUpdate` update strategy with `MaxUnavailable` evacuation support can have certain
-  advantages and disadvantages. It can reduce the pod disruption if the number of evacuated pods
+  deletion. We cannot provide an eviction strategy for these.
+- `RollingUpdate` update strategy with `MaxUnavailable` eviction request support can have certain
+  advantages and disadvantages. It can reduce the pod disruption if the number of evicted pods
   is greater than the `MaxUnavailable` field. Unfortunately, in some cases the stateful set pods
   may be covered by PDBs, and the pod disruptions might exceed the expected maximum number of
-  disruptions. Therefore, we would need to introduce a new field (e.g., `.spec.evacuationStrategy`)
-  that would provide the ability to opt into this behavior.
+  disruptions. Therefore, we would need to introduce a new field
+  (e.g., `.spec.evictionRequestStrategy`) that would provide the ability to opt into this behavior.
 
-The evacuation is similar to that of the [Deployment Controller](#deployment-controller). Except
+The eviction logic is similar to that of the [Deployment Controller](#deployment-controller). Except
 that it is conditioned by the presence of the `.spec.updateStrategy.rollingUpdate.MaxUnavailable`
-field and the `.spec.evacuationStrategy` field. Instead of the pod surge, we will delete pods from
-the highest index to the lowest according to the `MaxUnavailable` field. Then we wait for the new
-pods to become available, before deleting the next batch of pods until there is no Evacuation
-object.
+field and the `.spec.evictionRequestStrategy` field. Instead of the pod surge, we will delete pods
+from the highest index to the lowest according to the `MaxUnavailable` field. Then we wait for the
+new pods to become available, before deleting the next batch of pods until there is no
+EvictionRequest object.
 
 One alternative is to implement the `MaxSurge` feature for StatefulSets. For example a surge number
 of high index pods and PVCs could be provisioned until the lower index pods can be recreated. Once
 the lower index pods are migrated, the higher index pods could be scaled down and removed.
 
-Another alternative is for the application to implement its own evacuator and register it as a
-high-priority evacuator on the application pods. It can then intercept the Evacuation objects and
-ensure graceful pod removal without any application disruption.
-
+Another alternative is for the application to implement its own interceptor and register it as a
+high-priority interceptor on the application pods. It can then intercept the EvictionRequest objects
+and ensure graceful pod removal without any application disruption.
 
 #### DaemonSet and Static Pods
 
-DaemonSet pods and mirror/static pods can potentially be evacuated, but cannot be evicted because
-they can run critical services.
-- The daemonset controller can be made Evacuation aware and graceful terminate pods on nodes under
-  NodeMaintenance (proposed feature in [Declarative Node Maintenance KEP](https://github.com/kubernetes/enhancements/pull/4213)).
-  The NodeMaintenance would be used by the daemonset controller as a scheduling hint to not
-  restart the pods on a node.
-- An application with access to a node's filesystem could observe the Evacuation of a mirror pod
-  and remove the static pod manifest from the node, resulting in static pod termination.
-- Kubelet could be made aware of the static pods Evacuations and allow their termination in
+DaemonSet pods and mirror/static pods can potentially be terminated by EvictionRequest, but cannot
+be simply evicted because they can run critical services.
+- The daemonset controller can be made EvictionRequest aware and graceful terminate pods on nodes
+  under NodeMaintenance (proposed feature in [Declarative Node Maintenance KEP](https://github.com/kubernetes/enhancements/pull/4213)). The
+  NodeMaintenance would be used by the daemonset controller as a scheduling hint to not restart the
+  pods on a node.
+- An application with access to a node's filesystem could observe the EvictionRequest of a mirror
+  pod and remove the static pod manifest from the node, resulting in static pod termination.
+- Kubelet could be made aware of the static pods EvictionRequests and allow their termination in
   certain scenarios (e.g., during the final phase of node maintenance).
 
 #### HorizontalPodAutoscaler
 
 A new feature could be added to HPA, to temporarily increase the amount of pods during a disruption.
 
-Upon detecting an evacuation of pods under the HPA workload, the HPA would increase the number of
-replicas by the number of evacuations. It would become an evacuator and reconcile the Evacuation
-status until these new pods become ready. Then it would set `.status.activeEvacuatorCompleted` to
-`true` to allow the evacuation controller to evict these pods. After the evacuated pods terminate
-and the Evacuation objects are garbage collected, HPA can decrease the number of pods required by
-the workload to the original number.
+Upon detecting an eviction request of pods under the HPA workload, the HPA would increase the number
+of replicas by the number of eviction requests. It would become an interceptor and reconcile the
+EvictionRequest status until these new pods become ready. Then it would set
+`.status.activeInterceptorCompleted` to `true` to allow the eviction request controller to evict
+these pods. After the evicted pods terminate and the EvictionRequest objects are garbage collected,
+HPA can decrease the number of pods required by the workload to the original number.
 
 This has the following benefits:
 - 1 replica applications can run on the cluster without losing any availability during a disruption.
   This allows running applications in scenarios where HA is not possible or necessary.
 - No PDB is required anymore to ensure a minimum availability. No 3rd part PDB spec reconciliation
-  is necessary. HPA applications will never lose any availability due to Evacuations. The
+  is necessary. HPA applications will never lose any availability due to EvictionRequests. The
   availability can still be lost by other means. We expect that all components will eventually move
-  to the Evacuation API instead of using a raw eviction API.
+  to the EvictionRequest API instead of using a raw eviction API.
 
 HPA could get into the conflict with the pod controller (e.g. Deployment). Different controllers
-have different scaling approaches to HPA. This could be resolved with an opt-in behavior, by
-setting the evacuation priority to each HPA object.The HPA controller would then annotate the
-workload pods with its evacuator class and a priority.
+have different scaling approaches to HPA. This could be resolved with an opt-in behavior, by setting
+the interceptor priority to each HPA object.The HPA controller would then annotate the workload pods
+with its interceptor class and a priority.
 
 - By default, we could set a lower priority than controllers, which have a default priority of
   `10000`. We would prefer the controller's behaviour. For example, Deployment's `.spec.maxSurge`
   would be preferred over HPA. Otherwise, HPA might scale less or more than `.spec.maxSurge`.
 - If the HPA scaling logic is preferred, a user could set a higher priority on the HPA object.
 
+
+##### HorizontalPodAutoscaler Pod Surge Example
+
+We can use HPA running 1 pod to prevent a disruption for the underlying application. By scaling up
+first before terminating the pods.
+
+1. A single pod A of application W is created with a ReplicaSet controller interceptor annotation
+   (priority 10000). Application W is a webserver that is scaled dynamically according to the
+   traffic. If there is a low traffic, HPA scales down the number of pods to 1. The application
+   should not lose availability when its single replica gets disrupted.
+2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets an interceptor
+   annotation (higher priority, e.g. 11000) on all of these pods.
+3. A node drain controller starts draining a node Z and makes it unschedulable.
+4. The node drain controller creates an EvictionRequest for the only pod of application W to evict
+   it from a node.
+5. The eviction request controller designates the HPA as the interceptor based on the highest
+   priority. No action (termination) is taken on the single pod yet.
+6. The HPA controller creates a single surge pod B to compensate for the future loss of
+   availability of pod A. The new pod is created by temporarily scaling up the deployment.
+7. Pod B is scheduled on a new schedulable node that is not under the node drain.
+8. Pod B becomes available.
+9. The HPA scales the surging deployment back down to 1 replica.
+10. The HPA sets `ActiveInterceptorCompleted=true` on the eviction requests of pod A, which is ready
+    to be deleted.
+11. The eviction request controller designates the replica set controller as the next interceptor.
+12. The replica set controller deletes the pods to which an EvictionRequest object has been
+    assigned, preserving the availability of the webserver.
+
+
 #### Descheduling and Downscaling
 
-We can use the Evacuation API to deschedule a set of pods controlled by a Deployment/ReplicaSet.
-This is useful when we want to remove a set of pods from a node, either for node maintenance
-reasons or to rebalance the pods across additional nodes.
+We can use the EvictionRequest API to deschedule a set of pods controlled by a
+Deployment/ReplicaSet. This is useful when we want to remove a set of pods from a node, either for
+node maintenance reasons or to rebalance the pods across additional nodes.
 
 If set up correctly, the deployment controller will first scale up its pods to achieve this. In
 order to support any de/scheduling constraints during downscaling, we should temporarily disable an
@@ -1119,20 +1219,24 @@ immediate upscaling.
 
 HPA Downscaling example:
 
-1. Pods of application A are created with Deployment controller evacuator annotation (priority 10000)
-2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets an evacuator
+1. Pods of application A are created with a Deployment controller interceptor annotation
+   (priority 10001) and a ReplicaSet controller interceptor annotation (priority 10000).
+2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets an interceptor
    annotation (higher priority, e.g. 11000) on all of these pods.
 3. A subset of pods from application A are chosen by the HPA to be scaled down. This may be done in
    a collaboration with another component responsible for resolving the scheduling constraints.
-4. The HPA creates Evacuation objects for these chosen pods.
-5. The evacuation controller designates the HPA as the evacuator based on the highest priority. No
-   action (termination) is taken on the pods yet.
+4. The HPA creates EvictionRequest objects for these chosen pods.
+5. The eviction request controller designates the HPA as the interceptor based on the highest
+   priority. No action (termination) is taken on the pods yet.
 6. The HPA downscales the Deployment workload.
-7. The HPA sets ActiveEvacuatorCompleted to true on its own evacuations.
-8. The evacuation controller designates the Deployment (controller) as the next evacuator.
-9. The deployment subsequently downscales the underlying ReplicaSet(s).
-10. The ReplicaSet controller deletes the pods to which an Evacuation object has been assigned,
-    preserving the scheduling constraints.
+7. The HPA sets `ActiveInterceptorCompleted=true` on its own eviction requests.
+8. The eviction request controller designates the deployment controller as the next interceptor.
+9. The deployment controller subsequently scales down the underlying ReplicaSet(s).
+10. The deployment controller sets `ActiveInterceptorCompleted=true` on the eviction requests of
+    pods that are ready to be deleted.
+11. The eviction request controller designates the replica set controller as the next interceptor.
+12. The replica set controller deletes the pods to which an EvictionRequest object has been
+    assigned, preserving the scheduling constraints.
 
 The same can be done by any descheduling controller (instead of an HPA) to re-balance a set of Pods
 to comply with de/scheduling rules.
@@ -1171,10 +1275,11 @@ https://storage.googleapis.com/k8s-triage/index.html
 -->
 
 - Switching on and off the gate should enable/disable the feature and increase pod validation.
-- Test all the interactions between the evacuation controller and the evacuator.
-- Test the eviction of the pod if there is no evacuator or the evacuator stops responding.
-- Test switching between different evacuators/classes and resetting the Evacuation status.
-- Test the Evacuation object garbage collection and instigator finalizers.
+- Test all the interactions between the eviction request controller and the interceptor.
+- Test that the eviction of the pod happens if there is no interceptor or the interceptor stops
+  responding.
+- Test switching between different interceptors/classes and resetting the EvictionRequest status.
+- Test the EvictionRequest object garbage collection and requester finalizers.
 
 ##### e2e tests
 
@@ -1190,9 +1295,9 @@ We expect no non-infra related flakes in the last month as a GA graduation crite
 - <test>: <link to test coverage>
 -->
 
-- Test the full evacuation flow with multiple evacuators.
-- Test the eviction backoff if the eviction is blocked by a PDB. Check that the eviction terminates
-  the pod once PDB stops blocking the disruption
+- Test the full eviction request flow with multiple interceptors.
+- Test the eviction backoff if the API-initiated eviction is blocked by a PDB. Check that the
+  eviction terminates the pod once PDB stops blocking the disruption
 
 ### Graduation Criteria
 
@@ -1207,23 +1312,23 @@ We expect no non-infra related flakes in the last month as a GA graduation crite
 - Unit, integration and e2e tests passing.
 - Manual test for upgrade->downgrade->upgrade path will be performed.
 - Asses the state of the [NodeMaintenance feature](https://github.com/kubernetes/enhancements/issues/4212)
-  and other components interested in using the Evacuation API.
+  and other components interested in using the EvictionRequest API.
 - Re-evaluate whether adding additional metrics and events would be helpful. And update the KEP
   with existing ones.
-- Consider adding information to a pod to indicate that it is being evacuated. For example via
-  a condition.
+- Consider adding information to a pod to indicate that it is being evicted by EvictionRequest. For
+  example via a condition.
 
 #### GA
 
 - Every bug report is fixed.
 - E2E tests should be graduated to conformance.
 - Re-evaluate whether adding additional metrics would be helpful.
-- At least one Kubernetes workload (e.g., Deployment) should support evacuation to fully test the
-  new API and flow.
-- Adoption: look at all the consumers of the API, especially the instigators and evacuators. Look
+- At least one Kubernetes workload (e.g., Deployment) should support eviction request to fully test
+  the new API and flow.
+- Adoption: look at all the consumers of the API, especially the requesters and interceptors. Look
   at how the API is being used and see if there are any pain points that we could address.
 - Evaluate whether we can make changes to the eviction API to increase the safety for applications
-  and help with Evacuation API adoption. See [Changes to the Eviction API](#changes-to-the-eviction-api)
+  and help with EvictionRequest API adoption. See [Changes to the Eviction API](#changes-to-the-eviction-api)
   for more details.
 
 #### Deprecation
@@ -1239,10 +1344,11 @@ The feature is gated and no changes are required for an existing cluster to use 
 A version skew between the kube-controller-manager and the kube-apiserver is not supported as the
 feature will not work properly. The feature should be used after a full upgrade has completed.
 
-If kube-apiserver is behind, the Evacuation API will not be served.
+If kube-apiserver is behind, the EvictionRequest API will not be served.
 
-If kube-controller is behind, the evacuation controller will not run and reconcile the Evacuations.
-Thus, there will be no selection of evacuators, eviction of pods, or garbage collection.
+If kube-controller is behind, the eviction request controller will not run and reconcile the
+EvictionRequests. Thus, there will be no selection of interceptors, eviction of pods, or garbage
+collection.
 
 ## Production Readiness Review Questionnaire
 
@@ -1251,35 +1357,34 @@ Thus, there will be no selection of evacuators, eviction of pods, or garbage col
 ###### How can this feature be enabled / disabled in a live cluster?
 
 - [x] Feature gate (also fill in values in `kep.yaml`)
-  - Feature gate name: EvacuationAPI
+  - Feature gate name: EvictionRequestAPI
   - Components depending on the feature gate: kube-apiserver, kube-controller-manager
 
 ###### Does enabling the feature change any default behavior?
 
-Pod annotations with `evacuation.coordination.k8s.io/priority_` prefix will be validated.
-Since this is an unused k8s domain prefix, it should not cause any harm.
+Pod annotations with `interceptor.evictionrequest.coordination.k8s.io/priority_` prefix will be
+validated. Since this is an unused k8s domain prefix, it should not cause any harm.
 
 ###### Can the feature be disabled once it has been enabled (i.e. can we roll back the enablement)?
 
-Yes it can be rolled backed by disabling the feature gate, but it will cancel any pending
-evacuations. This means that pods that have been requested to be evicted, will continue to run.
-Also, any component that depends on the Evacuation API (e.g. evacuation instigator, evacuator) will
-also stop working or will not operate correctly. 
+Yes it can be rolled backed by disabling the feature gate, but it will cancel any pending eviction
+requests. This means that pods that have been requested to be evicted, will continue to run. Also,
+any component that depends on the EvictionRequest API (e.g. eviction requester, interceptor) will
+also stop working or will not operate correctly.
 
-It is not advisable to disable this feature, as it may leave the pods in the cluster in an
-undefined state. This may be especially harmful for applications that are in the middle of data
-migration.
+It is not advisable to disable this feature, as it may leave the pods in the cluster in an undefined
+state. This may be especially harmful for applications that are in the middle of data migration.
 
 Cluster admin should take the following precautions, before disabling this feature.
-- Ensure that no evacuations are in progress and no new evacuations will occur during the
-  disablement.
-- Ensure that all dependent components (evacuation instigators, evacuators) in the cluster support
+- Ensure that no eviction requests are in progress and no new eviction requests will occur during
+  the disablement.
+- Ensure that all dependent components (eviction requesters, interceptors) in the cluster support
   disabling the feature.
 
 ###### What happens if we reenable the feature if it was previously rolled back?
 
-The evacuation controller will start working again. And the pending evacuations will begin to
-migrate or evict pods from nodes.
+The eviction request controller will start working again. And the pending eviction requests will
+begin to migrate or evict pods from nodes.
 
 ###### Are there any tests for feature enablement/disablement?
 
@@ -1303,7 +1408,7 @@ The tests will be added in alpha.
 ###### How can a rollout or rollback fail? Can it impact already running workloads?
 
 During a rollout a bug could occur, resulting in a high load on the apiserver. Also, it is not
-recommended to use the Evacuation API during a rollout, as mentioned in the
+recommended to use the EvictionRequest API during a rollout, as mentioned in the
 [Version Skew Strategy](#version-skew-strategy)
 
 As mentioned in [Feature Enablement and Rollback](#feature-enablement-and-rollback), it is not
@@ -1313,7 +1418,7 @@ the feature.
 ###### What specific metrics should inform a rollback?
 
 - If there is an unreasonably large number of evictions reported by a
-  `evacuation_controller_evictions` metric.
+  `evictionrequest_controller_evictions` metric.
 - Large values of the `workqueue_depth` and `workqueue_work_duration_seconds` metrics may indicate
   a problem.
 
@@ -1323,15 +1428,16 @@ A manual test will be performed, as follows:
 
 1. Create a cluster in 1.30.
 2. Upgrade to 1.31.
-3. Create an Evacuation A and pod A. Observe that the Evacuation evicts the pod and terminates it.
-   Observe that the Evacuation gets garbage collected at the end.
-4. Create an Evacuation B, pod B and PDB B targeting the pod B with `maxUnavailable=0`. Observe
-   that the Evacuation increases the `.status.failedEvictionCounter`, but does not evict the pod.
+3. Create an EvictionRequest A and pod A. Observe that the EvictionRequest evicts the pod and
+   terminates it. Observe that the EvictionRequest gets garbage collected at the end.
+4. Create an EvictionRequest B, pod B and PDB B targeting the pod B with `maxUnavailable=0`. Observe
+   that the EvictionRequest increases the `.status.failedAPIEvictionCounter`, but does not evict the
+   pod.
 5. Downgrade to 1.30.
 6. Delete PDB B. Observe that the pod B keeps running without any termination.
 7. Upgrade to 1.31.
-8. Observe that the Evacuation B evicts pod B and terminates it. Observe that the Evacuation B
-   gets garbage collected at the end.
+8. Observe that the EvictionRequest B evicts pod B and terminates it. Observe that the
+   EvictionRequest B gets garbage collected at the end.
 
 ###### Is the rollout accompanied by any deprecations and/or removals of features, APIs, fields of API types, flags, etc.?
 
@@ -1341,21 +1447,22 @@ No.
 
 ###### How can an operator determine if the feature is in use by workloads?
 
-By observing the `evacuation_controller_evictions`, `evacuation_controller_active_evacuator`,
-`evacuation_controller_pod_evacuators` and `workqueue` metrics.
+By observing the `evictionrequest_controller_evictions`, `evictionrequest_controller_active_interceptor`,
+`evictionrequest_controller_pod_interceptors` and `workqueue` metrics.
 
 Cluster state can also be checked:
-- It is possible to create Evacuation objects.
-- Evacuation status is reconciled and a pod referenced in the Evacuation is eventually terminated.
+- It is possible to create EvictionRequest objects.
+- EvictionRequest status is reconciled and a pod referenced in the EvictionRequest is eventually
+  terminated.
 
 ###### How can someone using this feature know that it is working for their instance?
 
 - [x] Events
-  - Event Reason: TBD (will be added in Beta) 
-- [x] Evacuation API .status
+  - Event Reason: TBD (will be added in Beta)
+- [x] EvictionRequest API .status
   - Other field: all the status fields are correctly reconciled
 - [x] Other (treat as last resort)
-  - Details: After creating the Evacuation, the referenced pods should eventually be terminated.
+  - Details: After creating the EvictionRequest, the referenced pods should eventually be terminated.
 
 ###### What are the reasonable SLOs (Service Level Objectives) for the enhancement?
 
@@ -1366,16 +1473,16 @@ This feature should comply with the existing SLO about processing mutating API c
 ###### What are the SLIs (Service Level Indicators) an operator can use to determine the health of the service?
 
 - [x] Metrics
-  - Metric name: `evacuation_controller_evictions` (number of evictions per Evacuation and Pod)
+  - Metric name: `evictionrequest_controller_evictions` (number of evictions per EvictionRequest and Pod)
     - Components exposing the metric: kube-controller-manager (new)
-  - Metric name: `evacuation_controller_active_evacuator` (active evacuator per Evacuation and Pod)
+  - Metric name: `evictionrequest_controller_active_interceptor` (active interceptor per EvictionRequest and Pod)
     - Components exposing the metric: kube-controller-manager (new)
-  - Metric name: `evacuation_controller_active_instigator` (active evacuator per Evacuation and Pod)
+  - Metric name: `evictionrequest_controller_active_requester` (active interceptor per EvictionRequest and Pod)
       - Components exposing the metric: kube-controller-manager (new)
-  - Metric name: `evacuation_controller_pod_evacuators` (available evacuators per Pod)
+  - Metric name: `evictionrequest_controller_pod_interceptors` (available interceptors per Pod)
       - Components exposing the metric: kube-controller-manager (new)
   - Metric name: `workqueue_depth`, `workqueue_adds_total`, `workqueue_queue_duration_seconds`, `workqueue_work_duration_seconds`, `workqueue_unfinished_work_seconds`, `workqueue_retries_total`
-    - [Optional] Aggregation method: name=evacuations
+    - [Optional] Aggregation method: name=evictionrequests
     - Components exposing the metric: kube-controller-manager (new)
 
 ###### Are there any missing metrics that would be useful to have to improve observability of this feature?
@@ -1393,17 +1500,18 @@ No.
 ###### Will enabling / using this feature result in any new API calls?
 
 New API calls by the kube-controller-manager:
-- List and watch for Evacuations.
-- Update calls to reconcile Evacuation status. This is also done by an active 3rd party evacuator.
-- At least one `/eviction` call for each Evacuation. And possibly more with a backoff. This should
-  not dramatically increase the apiserver usage, as these calls should be made in similar
-  situations as today. Instead of repeating the eviction call manually with a components/cli
+- List and watch for EvictionRequests.
+- Update calls to reconcile EvictionRequest status. This is also done by an active 3rd party
+  interceptor.
+- At least one `/eviction` call for each EvictionRequest. And possibly more with a backoff. This
+  should not dramatically increase the apiserver usage, as these calls should be made in similar
+  situations as today. Instead of repeating the eviction API call manually with a components/cli
   (e.g. kubectl drain), it will be done by a controller.
 
 
 ###### Will enabling / using this feature result in introducing new API types?
 
-- API type: Evacuation
+- API type: EvictionRequest
 - Supported number of objects per cluster: 150000 (same as pods)
 - Supported number of objects per namespace 3000 (same as pods)
 
@@ -1424,7 +1532,7 @@ We will add an admission plugin, but it should not significantly increase the ti
 ###### Will enabling / using this feature result in non-negligible increase of resource usage (CPU, RAM, disk, IO, ...) in any components?
 
 Small RAM increase in kube-apiserver and kube-controller-manager to accommodate for caching the new
-API Evacuation type.
+API EvictionRequest type.
 
 Small CPU increase in kube-controller-manager to run additional controller.
 
@@ -1436,9 +1544,9 @@ No.
 
 ###### How does this feature react if the API server and/or etcd is unavailable?
 
-- It is not possible to communicate evacuation intent via the Evacuation API.
-- Evacuated pods are not evicted/terminated.
-- Migration operations done by evacuators may still happen in the background, but the
+- It is not possible to communicate eviction intent via the EvictionRequest API.
+- EvictionRequest pods are not evicted/terminated.
+- Migration operations done by interceptors may still happen in the background, but the
   observability will be limited.
 
 ###### What are other known failure modes?
@@ -1447,7 +1555,7 @@ N/A
 
 ###### What steps should be taken if SLOs are not being met to determine the problem?
 
-Apart from checking the metrics, events and Evacuation API status, kube-controller-manager and
+Apart from checking the metrics, events and EvictionRequest API status, kube-controller-manager and
 kube-apiserver logs should be checked.
 
 If the apiserver is flooded with requests (eviction, etc.), the feature gate should be turned off.
@@ -1457,28 +1565,29 @@ Before the feature gate is turned off, special precautions should be taken as me
 ## Implementation History
 
 - 2023-03-28: Evacuation API KEP was spun off from [Declarative NodeMaintenance](https://github.com/kubernetes/enhancements/issues/4212) KEP.
+- 2024-12-03: Evacuation API was renamed to EvictionRequest API.
 
 ## Drawbacks
 
 ## Alternatives
 
-### Evacuation or Eviction subresource
+### EvictionRequest or Eviction subresource
 
-Creating a pod subresource similar to the eviction one for the evacuation, or modifying the
-eviction subresource is not really feasible because we need to persist the evacuation information.
-Evacuations can take a long time, and we cannot block a single request until it is done or allow
-polling.
+Creating a pod subresource similar to the eviction one for the eviction request, or modifying the
+eviction subresource is not really feasible because we need to persist the eviction request
+information. EvictionRequests can take a long time, and we cannot block a single request until it is
+done or allow polling.
 
-There are multiple entities (Evacuation Instigators, Evacuators, evacuation controller) that need
-to communicate their intent to evacuate a pod, report on the progress of the evacuation, manage the
-lifecycle of the evacuation, and to handle the change of ownership between instigators and between
-evacuators. This is better done through a standalone API resource object.
+There are multiple entities (Eviction Requesters, Interceptors, eviction request controller) that
+need to communicate their intent to evict a pod, report on the progress of the eviction, manage the
+lifecycle of the eviction request, and to handle the change of ownership between requesters and
+between interceptors. This is better done through a standalone API resource object.
 
 ### Pod API
 
 The original proposal in the [Declarative Node Maintenance KEP](https://github.com/kubernetes/enhancements/pull/4213)
-was to use pod conditions to communicate the intent of Evacuation between the evacuation
-instigator and the evacuator.
+was to use pod conditions to communicate the intent of EvictionRequest between the eviction
+requester and the interceptor.
 
 Two new condition types would be introduced:
 1. `EvacuationRequested` condition should be set by a controller (e.g. node maintenance controller)
@@ -1519,11 +1628,11 @@ const (
 ```
 
 There are multiple issues with this approach:
-- Multiple evacuations instigators can try to evacuate a pod at the same time and there is no
-  simple way to track this in a single condition. It is much easier to handle concurrency on a
+- Multiple eviction requesters can try to request an eviction of a pod at the same time and there is
+  no simple way to track this in a single condition. It is much easier to handle concurrency on a
   standalone resource.
-- The observability of the evacuation progress, evacuator reference and other useful information
-  is lacking as we can see requested in the [User Stories](#user-stories-optional).
+- The observability of the eviction progress, interceptor reference and other useful information is
+  lacking as we can see requested in the [User Stories](#user-stories-optional).
 
 
 ### Enhancing PodDisruptionBudgets
@@ -1532,98 +1641,100 @@ The main function of today's PDBs is to count how many pods the application has 
 And how many of those pods are healthy and therefore how many can be disrupted.
 
 We would like to extend this API with the following functionality
-- Request the eviction/evacuation of a pod.
+- Request the eviction of a pod.
 - Observe which pods are in the progress of being evicted.
 
-As a cluster admin it should be possible to request the eviction/evacuation of any pod. Even the
-one that is guarded by a PDB. Currently, applications can set `maxUnavailable: 0` on a PDB and thus
-forbid any eviction. Among the reasons mentioned in the [Evacuation or Eviction subresource](#evacuation-or-eviction-subresource)
-section, it is also not possible to change the default eviction behavior for safety reasons. So an
-opt-in behavior would not be sufficient, as we need to solve this for all pods.
+As a cluster admin it should be possible to request the eviction of any pod. Even the one that is
+guarded by a PDB. Currently, applications can set `maxUnavailable: 0` on a PDB and thus forbid any
+eviction. Among the reasons mentioned in the
+[EvictionRequest or Eviction subresource](#evictionrequest-or-eviction-subresource) section, it is
+also not possible to change the default eviction behavior for safety reasons. So an opt-in behavior
+would not be sufficient, as we need to solve this for all pods.
 
 We could track these requests in the PDB object itself. A PDB can track multiple pods with its
 selector. The pods do not have to be from the same application, even though they usually are. These
 pods may run in various locations and may have various reasons for their disruption. It would be
-difficult to synchronize the PDB object for applications with a large number of pods. This could result
-in inconsistent updates and conflicts as many components would race for the PDB updates.
+difficult to synchronize the PDB object for applications with a large number of pods. This could
+result in inconsistent updates and conflicts as many components would race for the PDB updates.
 
 The updates to the PDB could be done solely by the eviction endpoint, but this is disqualified
 because many components override this endpoint with validating admission webhooks. And so we would
 not be sure that we are tracking all the eviction requests correctly.
 
-To decouple this, we could track the evacuation requests in the Pod. Unfortunately there is also
-a race for the pod by different actors ([Pod API](#pod-api-1)), so the eviction/evacuation request
-is better served as a standalone API that implements the synchronization.
+To decouple this, we could track the eviction requests in the Pod. Unfortunately there is also a
+race for the pod by different actors ([Pod API](#pod-api)), so the eviction request is better served
+as a standalone API that implements the synchronization.
 
-To implement better observability of the eviction/evacuation request, we would either have to ask
-each evacuator to update the PDB status which would also cause the synchronization issues.
+To implement better observability of the eviction, we would either have to ask each actor interested
+in the eviction to update the PDB status, which would also cause the synchronization issues.
 
-The PDB controller could also request the evacuation/eviction status as it does with the scale
-endpoint. The main difference is that the scale check is done per application and not per pod. So
-we would run into scalability issues here as well. Such a pod status endpoint would be hard to
-enforce and also difficult to implement for the user.
+The PDB controller could also request the eviction status as it does with the scale endpoint. The
+main difference is that the scale check is done per application and not per pod. So we would run
+into scalability issues here as well. Such a pod status endpoint would be hard to enforce and also
+difficult to implement for the user.
 
-Tracking the eviction/evacuation status in a pod would be feasible, but it would be hard to
-coordinate between the actors as mentioned. So it would be better to decouple the
-eviction/evacuation process from the pod as well.
+Tracking the eviction status in a pod would be feasible, but it would be hard to coordinate between
+the actors as mentioned. So it would be better to decouple the eviction request process from the pod
+as well.
 
-### Cancellation of Evacuation
+### Cancellation of EvictionRequest
 
-The current implementation requires Evacuation Instigators to set a finalizer on the Evacuation
-object to prevent the immediate garbage collection by the evacuation controller and for tracking
-purposes. Evacuators have to set the finalizer as well if they wish to prevent Evacuation
-cancellation (object removal).
+The current implementation requires Eviction Requesters to set a finalizer on the EvictionRequest
+object to prevent the immediate garbage collection by the eviction request controller and for
+tracking purposes. Interceptors have to set the finalizer as well if they wish to prevent
+EvictionRequest cancellation (object removal).
 
 One disadvantage of this approach is the added complexity. However, this shouldn't be too much of a
-problem, as Instigators and Evacuators are expected to reconcile the Evacuation object anyway. 
+problem, as Requesters and Interceptors are expected to reconcile the EvictionRequest object anyway.
 
-Instigators are advised to reconcile the Evacuation object to ensure that the Evacuation is
-present, but they are not required to do so. The evacuation controller will remove their finalizer
-as soon as the pod is removed. We do not expect a large number of Instigators, so the finalizer
-logic only needs to be implemented in a handful of places.
+Requesters are advised to reconcile the EvictionRequest object to ensure that the EvictionRequest is
+present, but they are not required to do so. The eviction request controller will remove their
+finalizer as soon as the pod is removed. We do not expect a large number of Requesters, so the
+finalizer logic only needs to be implemented in a handful of places.
 
-Evacuators are expected to reconcile the Evacuation status to advertise the progress of the
-evacuation. It should not be a big hurdle to add the finalizer to the Evacuation if needed.
- 
-To avoid this added complexity we could alternatively forbid deletion of Evacuations on admission,
-unless the pod has already disappeared. The main drawback is, that there are many applications
-today that block the node drain (either via a PDB or via a validating admission webhook).
-Evacuation and NodeMaintenance can be compared to the kubectl drain. If we forbid deletion of
-evacuations, the cluster administrator has no way of reverting the node drain decision. With the
-kubectl drain, this can easily be done by simply stopping the process. If the evacuation controller
-fails to evict multiple pods in a loop (even with a backoff), many requests to the apiserver could
-degrade cluster performance. By deleting the NodeMaintenance and associated Evacuations, the
-administrator can break the loop and buy time to understand which applications are blocking the
-node drain and asses whether they can be safely deleted.
+Interceptors are expected to reconcile the EvictionRequest status to advertise the progress of the
+eviction. It should not be a big hurdle to add the finalizer to the EvictionRequest if needed.
 
-### The Name of the Evacuation Objects
+To avoid this added complexity we could alternatively forbid deletion of EvictionRequests on
+admission, unless the pod has already disappeared. The main drawback is, that there are many
+applications today that block the node drain (either via a PDB or via a validating admission
+webhook). EvictionRequest and NodeMaintenance can be compared to the kubectl drain. If we forbid
+deletion of eviction requests, the cluster administrator has no way of reverting the node drain
+decision. With the kubectl drain, this can easily be done by simply stopping the process. If the
+eviction request controller fails to evict multiple pods in a loop (even with a backoff), many
+requests to the apiserver could degrade cluster performance. By deleting the NodeMaintenance and
+associated EvictionRequests, the administrator can break the loop and buy time to understand which
+applications are blocking the node drain and asses whether they can be safely deleted.
 
-It would be useful for the name of the Evacuation object to be unique and predictable for each pod
-instance to prevent the creation of multiple Evacuations for the same pod. Because we do not expect
-the evacuators to support interaction with multiple Evacuations for a pod. We can also verify
-`.spec.podRef` field on admission.
+### The Name of the EvictionRequest Objects
 
-We could validate each Evacuation `.metadata.name` to have one of the following formats:
+It would be useful for the name of the EvictionRequest object to be unique and predictable for each
+pod instance to prevent the creation of multiple EvictionRequests for the same pod. Because we do
+not expect the interceptors to support interaction with multiple EvictionRequests for a pod. We can
+also verify `.spec.podRef` field on admission.
+
+We could validate each EvictionRequest `.metadata.name` to have one of the following formats:
 
 #### Pod UID
 
 Pros:
 - Unique and conflict free.
-- Exact mapping of a Pod to an Evacuation. An Evacuation can look up a pod and vice versa.
+- Exact mapping of a Pod to an EvictionRequest. An EvictionRequest can look up a pod and vice versa.
 - Friendly to controllers (e.g. creation, lookup).
 
 Cons:
 - `.metadata.generateName` is not supported.
-- Not very user friendly. The workaround is to better format the output with the clients (e.g. kubectl).
+- Not very user friendly. The workaround is to better format the output with the clients (e.g.
+  kubectl).
 
 #### Pod Name
 
-Pros: 
+Pros:
 - User friendly.
 
 Cons:
 - `.metadata.generateName` is not supported.
-- Potential for conflict if an old Evacuation object exists and a pod with a new UID is created
+- Potential for conflict if an old EvictionRequest object exists and a pod with a new UID is created
   with the same name.
 - Actors in the system might start to rely on the name alone, rather than the full reference in
   `.spec.podRef.uid`, and mis-target pods.
@@ -1665,22 +1776,22 @@ Cons:
 - Name conflict resolution is left up to the users, but as a workaround they can simply generate the
   name.
 - Less consistent/user friendly. It is harder to match the pod for all the actors/controllers and
-  may result in an increased number of API requests to list all Evacuation objects.
+  may result in an increased number of API requests to list all EvictionRequest objects.
 
 
 ### Changes to the Eviction API
 
-We could forbid direct eviction for any pod that supports Evacuation (has at least one
-`evacuation.coordination.k8s.io/priority_${EVACUATOR_CLASS}` annotation). The annotations are
-validated on [Pod Admission](#pod-admission).
+We could forbid direct eviction for any pod that supports EvictionRequest (has at least one
+`interceptor.evictionrequest.coordination.k8s.io/priority_${INTERCEPTOR_CLASS}` annotation). The
+annotations are validated on [Pod Admission](#pod-admission).
 
 At this point, we know that there is a more graceful deletion of the pod available than just a PDB.
-We could ask the users making the eviction requests to create an Evacuation object instead.
+We could ask the users making the eviction requests to create an EvictionRequest object instead.
 
-If the evacuation fails because the evacuator(s) do not respond, then the evacuation controller
-will proceed with the eviction. To support this, the eviction could only be allowed only at this
-point. That is, if there is a matching Evacuation object and the eviction conditions are met
-according to the [Eviction](#eviction) section.
+If the pod termination fails because the interceptor(s) do not respond, then the eviction request
+controller will proceed with the eviction. To support this, the eviction could only be allowed only
+at this point. That is, if there is a matching EvictionRequest object and the eviction conditions
+are met according to the [Eviction](#eviction) section.
 
 Eviction of these annotated pods would act as a PDB with a fallback to eviction if things do not go
 according to plan.
@@ -1690,19 +1801,19 @@ non-blocking, but it would greatly increase the safety and availability for appl
 
 This would reduce the need to override the eviction endpoint with validating admission webhooks, as
 we can see in many projects today. They would only need a single controller responding to
-Evacuation objects.
+EvictionRequest objects.
 
 Disadvantages:
-- A person deploying the application completely loses the ability to enforce PDBs on evacuators
-  that support it, because the evacuator controller cannot use the eviction API. The controller
+- A person deploying the application completely loses the ability to enforce PDBs on interceptors
+  that support it, because the interceptor controller cannot use the eviction API. The controller
   either has to use delete calls or take the PDB into consideration, which is prone to
   implementation mistakes and races.
 - There are many in-tree and out-of-tree components that use the eviction API. Initially, this
   would break many use cases when going into beta. For example, a node drain which has many
-  implementations. Even though an alternative would exist in the form of the Evacuation API, it
+  implementations. Even though an alternative would exist in the form of the EvictionRequest API, it
   would take a long time for all the components and systems to migrate to this new API.
 
 We may consider introducing blocking eviction requests in the future, after communicating the
-deprecation and significant adoption of the Evacuation API.
+deprecation and significant adoption of the EvictionRequest API.
 
 ## Infrastructure Needed (Optional)

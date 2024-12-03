@@ -985,7 +985,7 @@ The validation also ensures that the interval of values that can be set is reaso
 
 The following diagrams describe what the EvictionRequest process will look like for each actor:
 
-![eviction request-process](eviction request.svg)
+![eviction-request-process](eviction-request-process.svg)
 
 
 ### Follow-up Design Details for Kubernetes Workloads

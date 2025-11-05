@@ -918,11 +918,11 @@ nodes, the entry with the lowest priority in the drainPlan is resolved first.
 apiVersion: v1alpha1
 kind: NodeMaintenance
 metadata:
-  name: "maintenance-a"
+  name: "master-2-maintenance"
 spec:
-  nodeSelector:
-    # selects nodes one and two
+  node: "master-2"
   stage: Drain
+  reason: "OS Upgrade"
   drainPlan:
     - podPriority: 5000
       podType: Default
@@ -1264,10 +1264,8 @@ the node one progress should stay the same regardless of the node maintenance dr
 apiVersion: v1alpha1
 kind: NodeMaintenance
 metadata:
-  name: "maintenance-c"
+  name: "maintenance"
 spec:
-  nodeSelector:
-    # selects nodes one and four
   stage: Drain
   drainPlan:
     - podPriority: 2000
@@ -1538,29 +1536,30 @@ controller:
 apiVersion: v1alpha1
 kind: EvictionRequest
 metadata:
-  finalizers:
-    - requester.evictionrequest.coordination.k8s.io/name_nodemaintenance.k8s.io
   labels:
-    app: critical-ds
-  name: ae9b4bc6-e4ca-4f8e-962b-2d4459b1f684-critical-ds-5nxjs
-  namespace: critical-workloads
+    app: important-deployment
+  name: ae9b4bc6-e4ca-4f8e-962b-2d4459b1f684
+  namespace: atlanta-maintainer-summit
 spec:
-  podRef:
-    name: critical-ds-5nxjs
-    uid:  ae9b4bc6-e4ca-4f8e-962b-2d4459b1f684
-  progressDeadlineSeconds: 1800
+  type: Soft
+  target:
+    podRef:
+      name: important-deployment-5nxjs
+      uid:  ae9b4bc6-e4ca-4f8e-962b-2d4459b1f684
+  requesters:
+    - nodemaintenance.k8s.io
   interceptors:
-    - interceptorClass: daemonset.apps.k8s.io
-      priority: 10000
-      role: controller
+    - interceptorClass: migration-controller.atlanta.io
+      priority: 15000
+  heartbeatDeadlineSeconds: 1800
 status:
-  activeInterceptorClass: daemonset.apps.k8s.io
+  activeInterceptorClass: migration-controller.atlanta.io
   activeInterceptorCompleted: false
-  progressTimestamp: "2024-04-22T21:40:32Z"
-  expectedInterceptorFinishTime: "2024-04-22T21:41:32Z" # now + terminationGracePeriodSeconds:
-  failedAPIEvictionCounter: 0
-  message: "critical-ds is terminating the pod due to node maintenance (OS upgrade)."
-  conditions: []
+  expectedInterceptorFinishTime: "2025-11-09T22:00:15Z"
+  heartbeatTime: "2025-11-09T21:40:32Z"
+  message: "important-deployment-5nxjs pod is being migrated due to node maintenance."
+  podEvictionStatus:
+    failedAPIEvictionCounter: 0
 ```
 
 Once the pod is terminated and removed from the node, it should not be re-scheduled on the node by

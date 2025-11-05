@@ -1135,16 +1135,17 @@ These actors are generic and can represent any application (e.g. Deployment).
 apiVersion: v1
 kind: Pod
 metadata:
-  name: p-1
-  spec:
-    ...
-    evictionInterceptors:
-      - interceptorClass: actor-a.k8s.io
-        priority: 10000
-        role: controller
-      - interceptorClass: actor-b.k8s.io
-        priority: 11000
-        role: notifier-with-delay
+  name: important-deployment-5nxjs
+  namespace: atlanta-maintainer-summit
+  uid:  ae9b4bc6-e4ca-4f8e-962b-2d4459b1f684
+  labels:
+    app: important-deployment
+  ...
+spec:
+  evictionInterceptors:
+    - interceptorClass: migration-controller.atlanta.io
+      priority: 15000
+  ...
 ```
 
 #### Multiple Dynamic Requesters and No EvictionRequest Cancellation

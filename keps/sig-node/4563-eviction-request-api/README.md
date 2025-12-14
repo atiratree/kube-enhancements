@@ -36,6 +36,7 @@
       - [DELETE](#delete)
       - [CREATE, UPDATE, DELETE](#create-update-delete)
     - [Immutability of EvictionRequest Spec Fields](#immutability-of-evictionrequest-spec-fields)
+    - [Workload API Support](#workload-api-support)
   - [EvictionRequest Process](#evictionrequest-process)
     - [EvictionRequest Completion and Deletion](#evictionrequest-completion-and-deletion)
   - [EvictionRequest Cancellation Examples](#evictionrequest-cancellation-examples)
@@ -524,7 +525,7 @@ We can distinguish 4 different kinds of interceptors:
 First, the interceptor should register itself with all the pods it is interested in
 evicting/intercepting (either partially or fully) by adding itself to the
 `.spec.evictionInterceptors` field of the pod. This list is then added to the
-[EvictionRequest](#pod-and-evictionrequest-api)) on admission.
+[EvictionRequest](#pod-and-evictionrequest-api) on admission.
 
 The Interceptor type should set the `name field. For more
 details see [Pod and EvictionRequest API](#pod-and-evictionrequest-api) and
@@ -662,6 +663,7 @@ type PodSpec struct {
 	// the graceful termination of a pod.
 	//
 	// The maximum length of the interceptors list is 100.
+	// Interceptors are not supported when the pod is part of a workload (.spec.workloadRef is set).
 	// This field is immutable.
 	// +optional
 	// +patchMergeKey=name
@@ -789,6 +791,7 @@ const (
 type EvictionTarget struct {
     // PodRef references a pod that is subject to eviction/termination.
     // Only one target (PodRef, *TBD*) is required.
+	// Pods that are part of the workload (.spec.workloadRef is set) are not supported.
     // This field is immutable.
     // +optional
     PodRef *LocalPodReference `json:"podRef,omitempty" protobuf:"bytes,1,opt,name=podRef"`
@@ -969,9 +972,14 @@ If the `.spec.target.podRef.uid` does not match with the pod's UID or no pod is 
 will be rejected. For more details, see [The Name of the EvictionRequest Objects](#the-name-of-the-evictionrequest-objects)
 section in the Alternatives.
 
-The API is designed to be extensible to include additional types that could be evicted (e.g. PVCs).
-Currently, `.spec.target.podRef` is required, but we might change this to include additional
-references in the future.
+The API is designed to be extensible to include additional evictable targets (e.g.,
+Workload, PVCs). Currently, the `.spec.target.podRef` field is required, but we might change this to include
+additional references in the future. 
+
+The new Workload API groups a set of pods that may not handle individual pod evictions well. It may
+be preferable to target the Workload resource. In the v1alpha1 version of the EvictionRequest API,
+pods referencing Workloads will be ignored. Therefore, we will reject any EvictionRequest that has a
+`.spec.workloadRef`. We will consider [Workload API Support](#workload-api-support) later.
 
 `.spec.requesters` must have at least one requester
 
@@ -1042,7 +1050,32 @@ the clients have to meet. But it would be hard to ever change these values in th
 to updating a smaller number of eviction requesters, when a better deadline value is agreed upon.
 The validation also ensures that the interval of values that can be set is reasonable.
 
+#### Workload API Support
 
+As mentioned in the [Pod and EvictionRequest API](#pod-and-evictionrequest-api) and the [CREATE](#create)
+sections, we currently ignore the eviction of pods that are part of a Workload (the Pod's
+`.spec.workloadRef` is set). The Workload API is primarily used for gang scheduling, but it could be
+useful for handling disruption of the whole group of pods simultaneously as well. For example, a
+controller (LeaderWorkerSet, JobSet, MPIJob or TrainJob) that runs jobs on these pods for AI
+training purposes might decide to wait for all of these pods to finish their work. It could also
+choose to store the state of these pods and run them later if a certain number of pods are disrupted.
+
+The disruption recovery behavior may depend on the workload. It may be useful to know a disruption
+policy per each workload. 
+- Pod Level Disruption: Pods can be disrupted as normal, regardless of belonging to the Workload.
+- Workload Level Disruption: Standalone disruption of pods is not possible and the Workload should
+  be disrupted as a whole. E.g. by creating an EvictionRequest that has `.spec.target.wokloadRef`
+  set.
+- Partial Workload Disruption: A workload can consist of multiple groups of pods (e.g. leaders and
+  workers). Each group may want to handle disruption differently. We could add a disruption policy
+  to each group as well. The policy could be similar as above and either require a pod disruption or
+  a workload disruption.
+
+There is one issue with observability. All the actors in the system are expected to be aware of Pod
+target evictions. Even if the main controller that manages the Workload resource can
+observe/intercept the EvictionRequest, other interceptors might not do so. It might be useful to
+treat Workload evictions as a syntactic sugar and transform such EvictionRequest into n number of
+Pod targeted EvictionRequests. The number n would depend on the policies mentioned above.
 
 ### EvictionRequest Process
 

@@ -1620,6 +1620,121 @@ This example can also be applied to other direct or higher level controllers
 12. The replica set controller deletes the pods to which an Eviction object has been
     assigned, preserving the availability of the application.
 
+#### ReplicaSet Controller
+
+Active response to EvictionRequest objects cannot be implemented without first analysing the owner
+of a pod and its capabilities. For example, not all deployment strategy configurations can simply
+utilize EvictionRequests without a loss of availability. This is also true for other owners.
+Therefore, it does not make sense to impose such a responsibility on the replication controller
+(e.g., by introducing new fields). Instead, deployments and other controllers should advertise the
+capabilities on ReplicaSet pods via the `.spec.evictionResponders` field and
+implement/perform the eviction logic.
+
+To facilitate the eviction request of high-level workloads and to take advantage of the
+EvictionRequest feature passively, the replicaset controller can prefer the deletion of pods with
+corresponding Eviction objects during a ReplicaSet scale down.
+
+To correctly orchestrate these steps, replica set controller should set a responder on its pods:
+
+```yaml
+    evictionResponders:
+      - name: replicaset.apps.k8s.io/deletion
+```
+
+And not delete these pods until it becomes the active responder.
+
+#### HorizontalPodAutoscaler Pod Surge
+
+A new feature could be added to HPA, to temporarily increase the amount of pods during a disruption.
+
+Upon detecting an eviction request of pods under the HPA workload, the HPA would increase the number
+of replicas by the number of eviction requests. It would become a responder and reconcile the
+Eviction status until these new pods become ready. Then it would set responder `.completionTime` to
+allow the imperative eviction responder controller to evict these pods. After the evicted pods
+terminate and the EvictionRequest objects have a `TargetEvicted=True` condition, HPA can decrease
+the number of pods required by the workload to the original number.
+
+This has the following benefits:
+
+- 1 replica applications can run on the cluster without losing any availability during a disruption.
+  This allows running applications in scenarios where HA is not possible or necessary.
+- No PDB is required anymore to ensure a minimum availability. No 3rd part PDB spec reconciliation
+  is necessary. HPA applications will never lose any availability due to EvictionRequests. The
+  availability can still be lost by other means. We expect that all components will eventually move
+  to the EvictionRequest API instead of using a raw eviction API.
+
+HPA could get into the conflict with the pod controller (e.g. Deployment). Different controllers
+have different scaling approaches to HPA. This could be resolved with an opt-in behavior, by setting
+the responder priority to each HPA object.The HPA controller would then mark the workload pods with
+the correct priority in `.spec.evictionResponders`.
+
+- By default, we could set a lower priority than controllers to prefer the controller's behaviour.
+  For example, Deployment's `.spec.maxSurge` would be preferred over HPA. Otherwise, HPA might scale
+  less or more than `.spec.maxSurge`.
+- If the HPA scaling logic is preferred, a user could set a higher priority on the HPA object.
+
+##### HorizontalPodAutoscaler Pod Surge Example
+
+We can use HPA running 1 pod to prevent a disruption for the underlying application. By scaling up
+first before terminating the pods.
+
+1. A single pod A of application W is created with a ReplicaSet controller responder. Application
+   W is a webserver that is scaled dynamically according to the traffic. If there is a low traffic,
+   HPA scales down the number of pods to 1. The application should not lose availability when its
+   single replica gets disrupted.
+2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets a responder at a
+   higher priority on all of these pods.
+3. A node drain controller starts draining a node Z and makes it unschedulable.
+4. The node drain controller creates an EvictionRequest for the only pod of application W to evict
+   it from a node.
+5. The eviction request controller designates the HPA as the responder by updating
+   `.status.targetResponders[0].state` to `Active`. No action (termination) is taken on the single
+   pod yet.
+6. The HPA controller creates a single surge pod B to compensate for the future loss of
+   availability of pod A. The new pod is created by temporarily scaling up the deployment.
+7. Pod B is scheduled on a new schedulable node that is not under the node drain.
+8. Pod B becomes available.
+9. The HPA scales the surging deployment back down to 1 replica.
+10. The HPA sets `.status.responders[].completionTime` on the eviction of pod A, which is ready
+    to be deleted.
+11. The eviction request controller designates the replica set controller as the next responder by
+    updating `.status.targetResponders[1].state` to `Active`.
+12. The replica set controller deletes the pods to which an Eviction object has been
+    assigned, preserving the availability of the webserver.
+
+#### Descheduling and Downscaling
+
+We can use the EvictionRequest API to deschedule a set of pods controlled by a
+Deployment/ReplicaSet. This is useful when we want to remove a set of pods from a node, either for
+node maintenance reasons or to rebalance the pods across additional nodes.
+
+If set up correctly, the deployment controller will first scale up its pods to achieve this. In
+order to support any de/scheduling constraints during downscaling, we should temporarily disable an
+immediate upscaling.
+
+##### HPA Downscaling example:
+
+1. A set of pods A of an application P are created with a Deployment controller responder and a
+   ReplicaSet controller responder.
+2. The Deployment and its pods are controlled/scaled by the HPA. The HPA sets a responder at a
+   higher priority on all of these pods.
+3. A subset of pods from application A are chosen by the HPA to be scaled down. This may be done in
+   a collaboration with another component responsible for resolving the scheduling constraints.
+4. The HPA creates EvictionRequest objects for these chosen pods.
+5. The eviction request controller designates the HPA as the responder by updating
+   `.status.targetResponders[0].state` to `Active`
+6. The HPA downscales the Deployment workload.
+7. The HPA sets `.status.responders[].completionTime` on the created evictions.
+8. The eviction request controller designates the deployment controller as the next responder by
+    updating `.status.targetResponders[1].state` to `Active`.
+9. The deployment controller subsequently scales down the underlying ReplicaSet(s).
+10. The deployment controller sets `.status.responders[].completionTime` on the eviction of
+    pods that are ready to be deleted.
+11. The eviction request controller designates the replica set controller as the next responder by
+   updating `.status.targetResponders[2].state` to `Active`.
+12. The replica set controller deletes the pods to which an EvictionRequest object has been
+    assigned, preserving the scheduling constraints.
+
 ### Future Improvements
 
 #### New Targets Types
